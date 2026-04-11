@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/message.dart';
@@ -13,11 +14,23 @@ class ConversationState {
   final String theirLanguage;
   final bool isProcessing;
 
+  /// 实时翻译相关状态
+  final String? detectedSourceLang;
+  final String? detectedTargetLang;
+  final String realtimeTranslation;
+  final bool isDetecting;
+  final bool isTranslating;
+
   const ConversationState({
     this.messages = const [],
     this.myLanguage = 'zh',
     this.theirLanguage = 'en',
     this.isProcessing = false,
+    this.detectedSourceLang,
+    this.detectedTargetLang,
+    this.realtimeTranslation = '',
+    this.isDetecting = false,
+    this.isTranslating = false,
   });
 
   ConversationState copyWith({
@@ -25,12 +38,32 @@ class ConversationState {
     String? myLanguage,
     String? theirLanguage,
     bool? isProcessing,
+    String? detectedSourceLang,
+    String? detectedTargetLang,
+    String? realtimeTranslation,
+    bool? isDetecting,
+    bool? isTranslating,
   }) {
     return ConversationState(
       messages: messages ?? this.messages,
       myLanguage: myLanguage ?? this.myLanguage,
       theirLanguage: theirLanguage ?? this.theirLanguage,
       isProcessing: isProcessing ?? this.isProcessing,
+      detectedSourceLang: detectedSourceLang ?? this.detectedSourceLang,
+      detectedTargetLang: detectedTargetLang ?? this.detectedTargetLang,
+      realtimeTranslation: realtimeTranslation ?? this.realtimeTranslation,
+      isDetecting: isDetecting ?? this.isDetecting,
+      isTranslating: isTranslating ?? this.isTranslating,
+    );
+  }
+
+  /// 清空检测/翻译状态
+  ConversationState clearRealtime() {
+    return ConversationState(
+      messages: messages,
+      myLanguage: myLanguage,
+      theirLanguage: theirLanguage,
+      isProcessing: false,
     );
   }
 }
@@ -48,50 +81,129 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   })  : _asrService = asrService,
         _translationService = translationService,
         _languageDetectService = languageDetectService,
-        super(const ConversationState());
+        super(const ConversationState()) {
+    _initLanguageDetect();
+  }
 
-  /// 设置我的语言
+  /// 初始化语种检测（从 assets 复制模型并加载）
+  Future<void> _initLanguageDetect() async {
+    try {
+      await _languageDetectService.initialize();
+      debugPrint('[ConversationNotifier] 语种检测服务初始化完成');
+    } catch (e) {
+      debugPrint('[ConversationNotifier] 语种检测初始化失败: $e');
+      debugPrint('[ConversationNotifier] 将使用后备检测逻辑');
+    }
+  }
+
   void setMyLanguage(String langCode) {
     state = state.copyWith(myLanguage: langCode);
   }
 
-  /// 设置对方语言
   void setTheirLanguage(String langCode) {
     state = state.copyWith(theirLanguage: langCode);
   }
 
-  /// 发送文本消息
-  /// 流程: 检测语种 → 确定翻译方向 → 翻译 → 生成消息
+  /// 检测语种并确定翻译方向
+  /// 限制结果为 myLanguage / theirLanguage 二选一
+  ({String source, String target}) _detectDirection(String text) {
+    final detectResult = _languageDetectService.detectLanguage(text);
+    final rawLang = detectResult.languageCode;
+
+    if (_matchesLanguage(rawLang, state.theirLanguage)) {
+      return (source: state.theirLanguage, target: state.myLanguage);
+    }
+    // 默认: 识别为 myLanguage（包括无法识别时）
+    return (source: state.myLanguage, target: state.theirLanguage);
+  }
+
+  /// 实时语种检测 + 翻译（边输入边调用）
+  Future<void> detectAndTranslate(String text) async {
+    if (text.trim().isEmpty) {
+      if (mounted) state = state.clearRealtime();
+      return;
+    }
+
+    if (mounted) state = state.copyWith(isDetecting: true);
+
+    try {
+      final dir = _detectDirection(text);
+
+      if (!mounted) return;
+      state = state.copyWith(
+        detectedSourceLang: dir.source,
+        detectedTargetLang: dir.target,
+        isDetecting: false,
+        isTranslating: true,
+      );
+
+      final translated = await _translationService.translate(
+        text,
+        LanguageCodes.getNllbCode(dir.source),
+        LanguageCodes.getNllbCode(dir.target),
+      );
+
+      if (!mounted) return;
+      state = state.copyWith(
+        realtimeTranslation: translated,
+        isTranslating: false,
+      );
+    } catch (e) {
+      debugPrint('[ConversationNotifier] 实时检测翻译失败: $e');
+      if (mounted) {
+        state = state.copyWith(isDetecting: false, isTranslating: false);
+      }
+    }
+  }
+
+  /// 清除实时翻译状态
+  void clearRealtime() {
+    if (mounted) state = state.clearRealtime();
+  }
+
+  /// 完成输入 — 将当前实时翻译结果保存为消息
+  void commitTranslation(String originalText) {
+    if (originalText.trim().isEmpty) return;
+    if (state.realtimeTranslation.isEmpty) return;
+
+    final message = Message(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      originalText: originalText,
+      translatedText: state.realtimeTranslation,
+      sourceLanguage: state.detectedSourceLang ?? state.myLanguage,
+      targetLanguage: state.detectedTargetLang ?? state.theirLanguage,
+      isFromMe: state.detectedSourceLang == state.myLanguage,
+      timestamp: DateTime.now(),
+      inputType: InputType.text,
+    );
+
+    state = state.copyWith(
+      messages: [...state.messages, message],
+    );
+  }
+
+  /// 发送文本消息（完整流程: 检测 → 翻译 → 保存）
   Future<void> sendTextMessage(String text) async {
     if (text.trim().isEmpty) return;
 
     state = state.copyWith(isProcessing: true);
 
     try {
-      // 1. 检测输入语种
-      final detectResult = await _languageDetectService.detectLanguage(text);
-      final detectedLang = detectResult.languageCode;
+      final dir = _detectDirection(text);
 
-      // 2. 确定翻译方向
-      final bool isFromMe = _isMyLanguage(detectedLang);
-      final String sourceLang = isFromMe ? state.myLanguage : state.theirLanguage;
-      final String targetLang = isFromMe ? state.theirLanguage : state.myLanguage;
-
-      // 3. 翻译
-      final String translated = await _translationService.translate(
+      final translated = await _translationService.translate(
         text,
-        LanguageCodes.getNllbCode(sourceLang),
-        LanguageCodes.getNllbCode(targetLang),
+        LanguageCodes.getNllbCode(dir.source),
+        LanguageCodes.getNllbCode(dir.target),
       );
 
-      // 4. 创建消息并添加到列表
       final message = Message(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
         originalText: text,
         translatedText: translated,
-        sourceLanguage: sourceLang,
-        targetLanguage: targetLang,
-        isFromMe: isFromMe,
+        sourceLanguage: dir.source,
+        targetLanguage: dir.target,
+        isFromMe: dir.source == state.myLanguage,
         timestamp: DateTime.now(),
         inputType: InputType.text,
       );
@@ -99,20 +211,21 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       state = state.copyWith(
         messages: [...state.messages, message],
         isProcessing: false,
+        detectedSourceLang: dir.source,
+        detectedTargetLang: dir.target,
+        realtimeTranslation: translated,
       );
     } catch (e) {
       state = state.copyWith(isProcessing: false);
-      rethrow;
+      debugPrint('[ConversationNotifier] sendTextMessage 失败: $e');
     }
   }
 
   /// 发送语音消息
-  /// 流程: ASR → 检测语种 → 翻译 → 生成消息
   Future<void> sendVoiceMessage(String audioPath) async {
     state = state.copyWith(isProcessing: true);
 
     try {
-      // 1. 语音识别
       final asrResult = await _asrService.transcribe(audioPath);
       final String text = asrResult.text;
 
@@ -121,33 +234,21 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         return;
       }
 
-      // 2. 检测语种 (优先使用 ASR 识别的语言，否则用文本检测)
-      String detectedLang = asrResult.detectedLanguage;
-      if (detectedLang.isEmpty) {
-        final detectResult = await _languageDetectService.detectLanguage(text);
-        detectedLang = detectResult.languageCode;
-      }
+      final dir = _detectDirection(text);
 
-      // 3. 确定翻译方向
-      final bool isFromMe = _isMyLanguage(detectedLang);
-      final String sourceLang = isFromMe ? state.myLanguage : state.theirLanguage;
-      final String targetLang = isFromMe ? state.theirLanguage : state.myLanguage;
-
-      // 4. 翻译
-      final String translated = await _translationService.translate(
+      final translated = await _translationService.translate(
         text,
-        LanguageCodes.getNllbCode(sourceLang),
-        LanguageCodes.getNllbCode(targetLang),
+        LanguageCodes.getNllbCode(dir.source),
+        LanguageCodes.getNllbCode(dir.target),
       );
 
-      // 5. 创建消息
       final message = Message(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
         originalText: text,
         translatedText: translated,
-        sourceLanguage: sourceLang,
-        targetLanguage: targetLang,
-        isFromMe: isFromMe,
+        sourceLanguage: dir.source,
+        targetLanguage: dir.target,
+        isFromMe: dir.source == state.myLanguage,
         timestamp: DateTime.now(),
         inputType: InputType.voice,
       );
@@ -155,24 +256,24 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       state = state.copyWith(
         messages: [...state.messages, message],
         isProcessing: false,
+        detectedSourceLang: dir.source,
+        detectedTargetLang: dir.target,
+        realtimeTranslation: translated,
       );
     } catch (e) {
       state = state.copyWith(isProcessing: false);
-      rethrow;
+      debugPrint('[ConversationNotifier] sendVoiceMessage 失败: $e');
     }
   }
 
-  /// 清空消息
   void clearMessages() {
     state = state.copyWith(messages: []);
   }
 
-  /// 判断检测到的语言是否为"我的语言"
-  bool _isMyLanguage(String detectedLang) {
-    // 简单匹配: 如果检测语言与 myLanguage 匹配（或前缀匹配）
-    if (detectedLang == state.myLanguage) return true;
-    if (detectedLang.startsWith(state.myLanguage)) return true;
-    if (state.myLanguage.startsWith(detectedLang)) return true;
+  bool _matchesLanguage(String detected, String target) {
+    if (detected == target) return true;
+    if (detected.startsWith(target)) return true;
+    if (target.startsWith(detected)) return true;
     return false;
   }
 }
@@ -187,7 +288,9 @@ final translationServiceProvider = Provider<TranslationService>((ref) {
 });
 
 final languageDetectServiceProvider = Provider<LanguageDetectService>((ref) {
-  return LanguageDetectService();
+  final service = LanguageDetectService();
+  ref.onDispose(() => service.dispose());
+  return service;
 });
 
 final conversationProvider =

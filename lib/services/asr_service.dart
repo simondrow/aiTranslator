@@ -14,11 +14,14 @@ class AsrResult {
 }
 
 /// 语音识别服务
-/// 使用 whisper.cpp 通过 dart:ffi 实现离线诵音识别
+/// 使用 whisper.cpp 通过 dart:ffi 实现离线语音识别。
+/// Whisper 模型未加载时返回空结果。
 class AsrService {
   WhisperBindings? _bindings;
   bool _isInitialized = false;
   String? _modelPath;
+
+  bool get isInitialized => _isInitialized;
 
   /// 初始化 Whisper 模型
   Future<void> initialize(String modelPath) async {
@@ -33,15 +36,14 @@ class AsrService {
 
   /// 对音频文件进行语音识别
   ///
-  /// [audioPath] 音频文件路径，要求 16kHz, 16-bit, mono WAV
-  /// 返回 [AsrResult] 包含识别文本和检测到的语言
+  /// Whisper 未初始化时返回空结果（stub 模式）。
   Future<AsrResult> transcribe(String audioPath) async {
     if (!_isInitialized || _bindings == null) {
-      throw StateError('AsrService 未初始化，请先调用 initialize()');
+      debugPrint('[AsrService] stub 模式: Whisper 未初始化，返回空结果');
+      return const AsrResult(text: '', detectedLanguage: '');
     }
 
     try {
-      // 在 isolate 中执行转写以避免阻塞 UI
       final result = await compute(_transcribeInIsolate, _TranscribeArgs(
         modelPath: _modelPath!,
         audioPath: audioPath,

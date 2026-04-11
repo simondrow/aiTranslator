@@ -16,7 +16,6 @@ option(AI_BUILD_FASTTEXT "Build fastText bridge" ON)
 # whisper.cpp 桥接库
 # ============================================================
 if(AI_BUILD_WHISPER)
-    # 添加 whisper.cpp 作为子模块 (需预先 git clone)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/CMakeLists.txt)
         add_subdirectory(third_party/whisper.cpp)
     else()
@@ -39,39 +38,68 @@ endif()
 # NLLB / CTranslate2 桥接库
 # ============================================================
 if(AI_BUILD_NLLB)
-    # CTranslate2 需要预编译安装或通过 find_package 引入
-    # find_package(CTranslate2 REQUIRED)
-
     add_library(ai_nllb SHARED
         bridge/nllb_bridge.c
     )
     target_include_directories(ai_nllb PRIVATE
         bridge
     )
-    # 当 CTranslate2 可用时取消注释:
-    # target_link_libraries(ai_nllb PRIVATE CTranslate2::CTranslate2)
 endif()
 
 # ============================================================
 # fastText 桥接库
 # ============================================================
 if(AI_BUILD_FASTTEXT)
-    # 添加 fastText 作为子模块
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fastText/CMakeLists.txt)
-        add_subdirectory(third_party/fastText)
-    else()
-        message(WARNING "fastText not found at third_party/fastText")
-    endif()
+    # fastText 源文件 — 编译为静态库直接链接
+    set(FASTTEXT_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fastText/src)
 
-    add_library(ai_fasttext SHARED
-        bridge/fasttext_bridge.c
-    )
-    target_include_directories(ai_fasttext PRIVATE
-        bridge
-        third_party/fastText/src
-    )
-    if(TARGET fasttext)
-        target_link_libraries(ai_fasttext PRIVATE fasttext)
+    if(EXISTS ${FASTTEXT_SRC_DIR}/fasttext.cc)
+        set(FASTTEXT_SOURCES
+            ${FASTTEXT_SRC_DIR}/args.cc
+            ${FASTTEXT_SRC_DIR}/autotune.cc
+            ${FASTTEXT_SRC_DIR}/densematrix.cc
+            ${FASTTEXT_SRC_DIR}/dictionary.cc
+            ${FASTTEXT_SRC_DIR}/fasttext.cc
+            ${FASTTEXT_SRC_DIR}/loss.cc
+            ${FASTTEXT_SRC_DIR}/matrix.cc
+            ${FASTTEXT_SRC_DIR}/meter.cc
+            ${FASTTEXT_SRC_DIR}/model.cc
+            ${FASTTEXT_SRC_DIR}/productquantizer.cc
+            ${FASTTEXT_SRC_DIR}/quantmatrix.cc
+            ${FASTTEXT_SRC_DIR}/utils.cc
+            ${FASTTEXT_SRC_DIR}/vector.cc
+        )
+
+        add_library(fasttext_core STATIC ${FASTTEXT_SOURCES})
+        target_include_directories(fasttext_core PUBLIC ${FASTTEXT_SRC_DIR})
+        set_target_properties(fasttext_core PROPERTIES
+            POSITION_INDEPENDENT_CODE ON
+            CXX_STANDARD 17
+        )
+        # 移除 -march=native (不适用于交叉编译)
+        target_compile_options(fasttext_core PRIVATE -O3 -funroll-loops)
+
+        # 桥接库 (C++ 源文件)
+        add_library(ai_fasttext SHARED
+            bridge/fasttext_bridge.cpp
+        )
+        target_include_directories(ai_fasttext PRIVATE
+            bridge
+            ${FASTTEXT_SRC_DIR}
+        )
+        target_link_libraries(ai_fasttext PRIVATE fasttext_core)
+        target_compile_definitions(ai_fasttext PRIVATE AI_HAS_FASTTEXT)
+        set_target_properties(ai_fasttext PROPERTIES
+            CXX_STANDARD 17
+        )
+    else()
+        message(WARNING "fastText source not found at ${FASTTEXT_SRC_DIR}")
+
+        # 仅编译 stub 桥接
+        add_library(ai_fasttext SHARED
+            bridge/fasttext_bridge.cpp
+        )
+        target_include_directories(ai_fasttext PRIVATE bridge)
     endif()
 endif()
 

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -24,11 +26,12 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
   final AudioService _audioService = AudioService();
   final TtsService _ttsService = TtsService();
 
-  String _currentTranslation = '';
-  String? _detectedSourceLang;
-  String? _detectedTargetLang;
   bool _isRecording = false;
   bool _isCompleted = false;
+
+  /// 防抖定时器 — 用户停顿后触发检测+翻译
+  Timer? _debounceTimer;
+  static const _debounceDuration = Duration(milliseconds: 400);
 
   @override
   void initState() {
@@ -39,6 +42,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
 
   @override
   void dispose() {
+    _debounceTimer?.cancel();
     _textController.removeListener(_onTextChanged);
     _textController.dispose();
     _textFocusNode.dispose();
@@ -47,45 +51,65 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
     super.dispose();
   }
 
+  /// 文字输入回调 — 带防抖的实时检测+翻译
   void _onTextChanged() {
-    if (_isCompleted && _textController.text.isEmpty) {
-      setState(() {
-        _isCompleted = false;
-        _currentTranslation = '';
-        _detectedSourceLang = null;
-        _detectedTargetLang = null;
-      });
-    } else {
+    final text = _textController.text;
+
+    // 清空输入 → 重置所有状态
+    if (text.isEmpty) {
+      _debounceTimer?.cancel();
+      ref.read(conversationProvider.notifier).clearRealtime();
+      if (_isCompleted) {
+        setState(() => _isCompleted = false);
+      }
       setState(() {});
+      return;
     }
+
+    // 已完成态下继续编辑 → 退回到输入态
+    if (_isCompleted) {
+      setState(() => _isCompleted = false);
+    }
+
+    // 防抖: 用户停止输入 400ms 后触发检测+翻译
+    _debounceTimer?.cancel();
+    _debounceTimer = Timer(_debounceDuration, () {
+      final currentText = _textController.text.trim();
+      if (currentText.isNotEmpty) {
+        ref.read(conversationProvider.notifier).detectAndTranslate(currentText);
+      }
+    });
+
+    setState(() {});
   }
 
-  Future<void> _sendTextMessage() async {
+  /// 用户按下回车/Done — 标记为完成态
+  Future<void> _onSubmitted(String _) async {
     final text = _textController.text.trim();
     if (text.isEmpty) return;
+
+    _debounceTimer?.cancel();
     _textFocusNode.unfocus();
 
     final notifier = ref.read(conversationProvider.notifier);
-    await notifier.sendTextMessage(text);
-
     final state = ref.read(conversationProvider);
-    if (state.messages.isNotEmpty) {
-      final lastMsg = state.messages.last;
-      setState(() {
-        _currentTranslation = lastMsg.translatedText;
-        _detectedSourceLang = lastMsg.sourceLanguage;
-        _detectedTargetLang = lastMsg.targetLanguage;
-        _isCompleted = true;
-      });
+
+    // 如果实时翻译已有结果，直接提交; 否则等待完整流程
+    if (state.realtimeTranslation.isNotEmpty) {
+      notifier.commitTranslation(text);
+      setState(() => _isCompleted = true);
+    } else {
+      // 尚未拿到翻译结果，走完整流程
+      await notifier.sendTextMessage(text);
+      setState(() => _isCompleted = true);
     }
   }
 
   void _clearAll() {
+    _debounceTimer?.cancel();
+    ref.read(conversationProvider.notifier).clearRealtime();
     setState(() {
       _textController.clear();
-      _currentTranslation = '';
-      _detectedSourceLang = null;
-      _detectedTargetLang = null;
       _isCompleted = false;
     });
   }
@@ -103,9 +127,6 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
             final lastMsg = state.messages.last;
             setState(() {
               _textController.text = lastMsg.originalText;
-              _currentTranslation = lastMsg.translatedText;
-              _detectedSourceLang = lastMsg.sourceLanguage;
-              _detectedTargetLang = lastMsg.targetLanguage;
               _isCompleted = true;
             });
           }
@@ -117,12 +138,11 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
       try {
         _textFocusNode.unfocus();
         await _audioService.startRecording();
+        _debounceTimer?.cancel();
+        ref.read(conversationProvider.notifier).clearRealtime();
         setState(() {
           _isRecording = true;
           _textController.clear();
-          _currentTranslation = '';
-          _detectedSourceLang = null;
-          _detectedTargetLang = null;
           _isCompleted = false;
         });
       } catch (e) {
@@ -140,24 +160,28 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
   void _speakSource() {
     final text = _textController.text.trim();
     if (text.isEmpty) return;
-    final lang = _detectedSourceLang ?? ref.read(conversationProvider).myLanguage;
+    final state = ref.read(conversationProvider);
+    final lang = state.detectedSourceLang ?? state.myLanguage;
     _ttsService.speak(text, lang);
   }
 
   void _speakTarget() {
-    if (_currentTranslation.isEmpty) return;
-    final lang = _detectedTargetLang ?? ref.read(conversationProvider).theirLanguage;
-    _ttsService.speak(_currentTranslation, lang);
+    final state = ref.read(conversationProvider);
+    if (state.realtimeTranslation.isEmpty) return;
+    final lang = state.detectedTargetLang ?? state.theirLanguage;
+    _ttsService.speak(state.realtimeTranslation, lang);
   }
 
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(conversationProvider);
     final bottomPadding = MediaQuery.of(context).padding.bottom;
+    final hasInput = _textController.text.isNotEmpty;
+    final hasTranslation = state.realtimeTranslation.isNotEmpty;
+    final isWorking = state.isDetecting || state.isTranslating;
 
     return Scaffold(
       backgroundColor: AppTheme.surfaceWhite,
-      // ---- AppBar: 左上角历史按钮, 中间标题, 右侧模型管理 ----
       appBar: AppBar(
         backgroundColor: AppTheme.surfaceWhite,
         leading: IconButton(
@@ -186,10 +210,8 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
       ),
       body: Stack(
         children: [
-          // ==== 主内容 ====
           Column(
             children: [
-              // ---- 翻译内容区 ----
               Expanded(
                 child: GestureDetector(
                   onTap: () => _textFocusNode.unfocus(),
@@ -200,38 +222,33 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const SizedBox(height: 16),
-                        _buildSourceArea(context, state),
-                        if (_textController.text.isNotEmpty ||
-                            _currentTranslation.isNotEmpty ||
-                            state.isProcessing)
-                          ..._buildTranslationArea(context, state),
+                        _buildSourceArea(state),
+                        if (hasInput || hasTranslation || isWorking)
+                          ..._buildTranslationArea(state),
                         const SizedBox(height: 32),
                       ],
                     ),
                   ),
                 ),
               ),
-              // ---- 底部区域 ----
-              _buildBottomArea(context, state, bottomPadding),
+              _buildBottomArea(state, bottomPadding),
             ],
           ),
-
-          // ==== 录音遮罩 ====
           if (_isRecording) _buildRecordingOverlay(bottomPadding),
         ],
       ),
     );
   }
 
-  /// 源文区域 — 无边框纯文字输入
-  Widget _buildSourceArea(BuildContext context, ConversationState state) {
+  /// 源文区域
+  Widget _buildSourceArea(ConversationState state) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // 完成态: 源语种标签
-        if (_isCompleted && _detectedSourceLang != null) ...[
+        if (_isCompleted && state.detectedSourceLang != null) ...[
           Text(
-            LanguageCodes.getDisplayName(_detectedSourceLang!),
+            LanguageCodes.getDisplayName(state.detectedSourceLang!),
             style: const TextStyle(
               fontSize: 14,
               fontWeight: FontWeight.w500,
@@ -241,7 +258,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
           const SizedBox(height: 8),
         ],
 
-        // 文本输入 — 大字号，无边框
+        // 文本输入
         Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -273,7 +290,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
                   isDense: true,
                 ),
                 textInputAction: TextInputAction.done,
-                onSubmitted: (_) => _sendTextMessage(),
+                onSubmitted: _onSubmitted,
               ),
             ),
             if (_textController.text.isNotEmpty && !_isCompleted)
@@ -289,8 +306,8 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
           ],
         ),
 
-        // 完成态: 原文下方 🔊 📋
-        if (_isCompleted && _currentTranslation.isNotEmpty) ...[
+        // 完成态: 🔊 📋
+        if (_isCompleted && state.realtimeTranslation.isNotEmpty) ...[
           const SizedBox(height: 8),
           Row(
             children: [
@@ -299,7 +316,8 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
               _ActionBtn(
                 icon: Icons.copy_outlined,
                 onTap: () {
-                  Clipboard.setData(ClipboardData(text: _textController.text));
+                  Clipboard.setData(
+                      ClipboardData(text: _textController.text));
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
                       content: Text('已复制原文'),
@@ -316,8 +334,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
   }
 
   /// 分隔线 + 译文区域
-  List<Widget> _buildTranslationArea(
-      BuildContext context, ConversationState state) {
+  List<Widget> _buildTranslationArea(ConversationState state) {
     return [
       const SizedBox(height: 12),
       // 蓝色分隔线
@@ -331,9 +348,9 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
       const SizedBox(height: 16),
 
       // 完成态: 目标语种标签
-      if (_isCompleted && _detectedTargetLang != null) ...[
+      if (_isCompleted && state.detectedTargetLang != null) ...[
         Text(
-          LanguageCodes.getDisplayName(_detectedTargetLang!),
+          LanguageCodes.getDisplayName(state.detectedTargetLang!),
           style: const TextStyle(
             fontSize: 14,
             fontWeight: FontWeight.w500,
@@ -343,12 +360,12 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
         const SizedBox(height: 8),
       ],
 
-      // 译文
-      if (state.isProcessing)
+      // 翻译中 / 译文
+      if (state.isDetecting || state.isTranslating)
         const _ProcessingIndicator()
-      else if (_currentTranslation.isNotEmpty)
+      else if (state.realtimeTranslation.isNotEmpty)
         Text(
-          _currentTranslation,
+          state.realtimeTranslation,
           style: const TextStyle(
             fontSize: 28,
             fontWeight: FontWeight.w500,
@@ -357,8 +374,8 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
           ),
         ),
 
-      // 完成态: 译文下方 🔊 📋
-      if (_isCompleted && _currentTranslation.isNotEmpty) ...[
+      // 完成态: 译文 🔊 📋
+      if (_isCompleted && state.realtimeTranslation.isNotEmpty) ...[
         const SizedBox(height: 8),
         Row(
           children: [
@@ -367,7 +384,8 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
             _ActionBtn(
               icon: Icons.copy_outlined,
               onTap: () {
-                Clipboard.setData(ClipboardData(text: _currentTranslation));
+                Clipboard.setData(
+                    ClipboardData(text: state.realtimeTranslation));
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
                     content: Text('已复制翻译结果'),
@@ -383,8 +401,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
   }
 
   /// 底部区域: 语言栏 + 麦克风
-  Widget _buildBottomArea(
-      BuildContext context, ConversationState state, double bottomPadding) {
+  Widget _buildBottomArea(ConversationState state, double bottomPadding) {
     return Container(
       decoration: BoxDecoration(
         color: AppTheme.backgroundGrey,
@@ -404,7 +421,6 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // 拖拽指示条
               Center(
                 child: Container(
                   width: 36,
@@ -416,10 +432,8 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
                 ),
               ),
               const SizedBox(height: 16),
-              // 语言选择栏
               const LanguageBar(),
               const SizedBox(height: 20),
-              // 麦克风按钮（大）
               GestureDetector(
                 onTap: _toggleVoiceRecording,
                 child: Container(
@@ -462,7 +476,6 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
             child: Column(
               children: [
                 const Spacer(flex: 3),
-                // 录音指示
                 Container(
                   width: 130,
                   height: 130,
@@ -504,7 +517,6 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
                   ),
                 ),
                 const Spacer(flex: 2),
-                // 底部停止按钮
                 Padding(
                   padding: EdgeInsets.only(bottom: 40 + bottomPadding),
                   child: Container(

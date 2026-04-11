@@ -5,8 +5,7 @@ import 'package:ffi/ffi.dart';
 
 // ============================================================
 // fastText FFI 绑定
-// 绑定 native/bridge/fasttext_bridge.c 中暴露的简化 C API
-// 用于文字语种检测
+// 绑定 native/bridge/fasttext_bridge.cpp 中暴露的简化 C API
 // ============================================================
 
 /// fastText 预测结果
@@ -19,12 +18,10 @@ class FastTextPrediction {
 
 // ---- Native 类型定义 ----
 
-/// 不透明句柄类型
 final class AIFastTextContext extends Opaque {}
 
-/// 预测结果结构体
 final class AIFastTextResultNative extends Struct {
-  external Pointer<Utf8> label;
+  external Pointer<Utf8> lang;
 
   @Float()
   external double confidence;
@@ -42,14 +39,8 @@ typedef AIFastTextPredictNative = AIFastTextResultNative Function(
 typedef AIFastTextPredict = AIFastTextResultNative Function(
     Pointer<AIFastTextContext> ctx, Pointer<Utf8> text);
 
-typedef AIFastTextFreeNative = Void Function(
-    Pointer<AIFastTextContext> ctx);
+typedef AIFastTextFreeNative = Void Function(Pointer<AIFastTextContext> ctx);
 typedef AIFastTextFree = void Function(Pointer<AIFastTextContext> ctx);
-
-typedef AIFastTextResultFreeNative = Void Function(
-    Pointer<AIFastTextResultNative> result);
-typedef AIFastTextResultFree = void Function(
-    Pointer<AIFastTextResultNative> result);
 
 /// FastText FFI 绑定封装
 class FastTextBindings {
@@ -79,7 +70,22 @@ class FastTextBindings {
     if (Platform.isAndroid) {
       return DynamicLibrary.open('libai_fasttext.so');
     } else if (Platform.isIOS || Platform.isMacOS) {
-      return DynamicLibrary.process();
+      // iOS: 符号通过 -force_load 静态链接到 Runner
+      // 先尝试 process()（release mode），再 fallback 到 executable()
+      try {
+        final lib = DynamicLibrary.process();
+        lib.lookup('ai_fasttext_init'); // probe
+        return lib;
+      } catch (_) {
+        try {
+          final lib = DynamicLibrary.executable();
+          lib.lookup('ai_fasttext_init'); // probe
+          return lib;
+        } catch (_) {
+          // 最终尝试打开 Runner.debug.dylib（debug mode hot-reload）
+          return DynamicLibrary.open('Runner.debug.dylib');
+        }
+      }
     } else if (Platform.isLinux) {
       return DynamicLibrary.open('libai_fasttext.so');
     } else if (Platform.isWindows) {
@@ -102,9 +108,6 @@ class FastTextBindings {
   }
 
   /// 预测文本语种
-  ///
-  /// [text] 待检测文本
-  /// 返回 [FastTextPrediction] 包含标签 (例如 "__label__zh") 和置信度
   FastTextPrediction predict(String text) {
     if (_ctx == null || _ctx == nullptr) {
       throw StateError('fastText 未初始化');
@@ -113,9 +116,8 @@ class FastTextBindings {
     final textPtr = text.toNativeUtf8();
     try {
       final result = _predictFn(_ctx!, textPtr);
-      final label = result.label.toDartString();
+      final label = result.lang.toDartString();
       final confidence = result.confidence;
-
       return FastTextPrediction(label: label, confidence: confidence);
     } finally {
       calloc.free(textPtr);

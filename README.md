@@ -21,7 +21,7 @@ Real-time conversation translation app — offline translation powered by on-dev
 | Framework | [Flutter](https://flutter.dev) 3.x | Cross-platform (iOS & Android) |
 | ASR | [whisper.cpp](https://github.com/ggerganov/whisper.cpp) | On-device speech recognition via dart:ffi |
 | Translation | [NLLB-200-distilled-600M](https://huggingface.co/facebook/nllb-200-distilled-600M) | Meta's multilingual translation via CTranslate2 + dart:ffi |
-| Language Detection | [fastText](https://fasttext.cc/) | lid.176.bin model via dart:ffi |
+| Language Detection | [fastText](https://fasttext.cc/) | lid.176.ftz model (~917KB, bundled in app) via dart:ffi |
 | TTS | System TTS | flutter_tts, uses device built-in TTS engine |
 | State Management | [Riverpod](https://riverpod.dev/) | flutter_riverpod with StateNotifier |
 | Model Download | [HuggingFace](https://huggingface.co/) | On-demand model download via dio |
@@ -64,7 +64,7 @@ AITranslator/
 │   ├── services/                          # Business services
 │   │   ├── asr_service.dart               # Speech recognition
 │   │   ├── translation_service.dart       # Translation
-│   │   ├── language_detect_service.dart   # Language detection
+│   │   ├── language_detect_service.dart   # Language detection (fastText)
 │   │   ├── audio_service.dart             # Audio recording
 │   │   └── tts_service.dart               # Text-to-speech
 │   ├── native/                            # FFI bindings
@@ -75,13 +75,18 @@ AITranslator/
 │       └── language_codes.dart            # Language code mappings
 ├── native/                                # C/C++ bridge code
 │   ├── CMakeLists.txt
-│   └── bridge/
-│       ├── whisper_bridge.{h,c}
-│       ├── nllb_bridge.{h,c}
-│       └── fasttext_bridge.{h,c}
-├── assets/models/                         # Model files directory
+│   ├── bridge/
+│   │   ├── whisper_bridge.{h,c}
+│   │   ├── nllb_bridge.{h,c}
+│   │   └── fasttext_bridge.{h,cpp}       # C++ bridge for fastText
+│   └── third_party/
+│       └── fastText/                      # Facebook fastText source (v0.9.2)
+├── assets/models/
+│   └── lid.176.ftz                        # fastText language ID model (~917KB, bundled)
 ├── android/                               # Android platform
 ├── ios/                                   # iOS platform
+│   ├── AiFasttext.podspec                 # CocoaPods spec for fastText native build
+│   └── ...
 └── pubspec.yaml
 ```
 
@@ -107,15 +112,23 @@ flutter run -d <device_id>
 
 ### 3. First Use
 
-The app launches into the main translation screen. AI models need to be downloaded on first use via the model manager (top-right download icon):
+The app launches into the main translation screen. The following AI models need to be downloaded on first use via the model manager (top-right download icon):
 
-| Model | Size | Purpose |
-|---|---|---|
-| Whisper Small | ~466 MB | Speech recognition |
-| NLLB-200-distilled-600M | ~600 MB | Machine translation |
-| fastText lid.176.bin | ~131 MB | Language detection |
+| Model | Size | Purpose | Status |
+|---|---|---|---|
+| fastText lid.176.ftz | ~917 KB | Language detection | ✅ Bundled in app |
+| Whisper Small | ~466 MB | Speech recognition | 需下载 |
+| NLLB-200-distilled-600M | ~600 MB | Machine translation | 需下载 |
 
-> **Note**: ASR, translation, and language detection currently run in stub mode. Native model integration is the next development milestone.
+> **Note**: ASR and translation currently run in stub mode. Language detection is integrated with real fastText inference. Native model integration for whisper.cpp and NLLB is the next development milestone.
+
+## Native Build
+
+### iOS
+fastText is compiled via CocoaPods (`ios/AiFasttext.podspec`). Running `pod install` or `flutter build ios` will automatically compile the fastText C++ source and link it into the Runner binary.
+
+### Android
+fastText is compiled via CMake (`native/CMakeLists.txt`). The `android/app/build.gradle` includes `externalNativeBuild` configuration that triggers CMake during the Android build.
 
 ## Usage
 
@@ -128,9 +141,9 @@ The app launches into the main translation screen. AI models need to be download
 
 ## Roadmap
 
+- [x] Integrate fastText native library (language detection)
 - [ ] Integrate whisper.cpp native library (replace ASR stub)
 - [ ] Integrate CTranslate2 + NLLB native library (replace translation stub)
-- [ ] Integrate fastText native library (replace language detection stub)
 - [ ] HuggingFace model download integration
 - [ ] Streaming translation display
 - [ ] Android real device testing

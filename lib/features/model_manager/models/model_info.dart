@@ -34,7 +34,8 @@ class ModelInfo {
     );
   }
 
-  /// 预定义模型列表
+  /// 需要下载的模型列表
+  /// 注意: fastText lid.176.ftz (917KB) 已打包在 assets 中，无需下载
   static List<ModelInfo> get requiredModels => [
         const ModelInfo(
           name: 'Whisper Small',
@@ -49,13 +50,6 @@ class ModelInfo {
               'https://huggingface.co/JustFrederik/nllb-200-distilled-600M-ct2-float16/resolve/main/model.bin',
           fileName: 'nllb-200-distilled-600M.bin',
           sizeInMB: 600,
-        ),
-        const ModelInfo(
-          name: 'fastText Language ID',
-          url:
-              'https://huggingface.co/facebook/fasttext-language-identification/resolve/main/model.bin',
-          fileName: 'lid.176.bin',
-          sizeInMB: 131,
         ),
       ];
 }

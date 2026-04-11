@@ -4,11 +4,14 @@ import '../native/nllb_bindings.dart';
 import '../utils/language_codes.dart';
 
 /// 翻译服务
-/// 使用 NLLB-200-distilled-600M 通过 CTranslate2 + dart:ffi 实现离线翻译
+/// 使用 NLLB-200-distilled-600M 通过 CTranslate2 + dart:ffi 实现离线翻译。
+/// NLLB 模型未加载时使用 stub 返回占位结果。
 class TranslationService {
   NllbBindings? _bindings;
   bool _isInitialized = false;
   String? _modelPath;
+
+  bool get isInitialized => _isInitialized;
 
   /// 初始化 NLLB 模型
   Future<void> initialize(String modelPath) async {
@@ -23,21 +26,20 @@ class TranslationService {
 
   /// 翻译文本
   ///
-  /// [text] 待翻译的文本
-  /// [fromLang] 源语言 NLLB 代码 (例如 "zho_Hans")
-  /// [toLang] 目标语言 NLLB 代码 (例如 "eng_Latn")
-  /// 返回翻译后的文本
+  /// NLLB 未初始化时返回 stub 结果: "[译文] 原文"
   Future<String> translate(
     String text,
     String fromLang,
     String toLang,
   ) async {
-    if (!_isInitialized || _bindings == null) {
-      throw StateError('TranslationService 未初始化，请先调用 initialize()');
+    if (fromLang == toLang) {
+      return text;
     }
 
-    if (fromLang == toLang) {
-      return text; // 相同语言无需翻译
+    if (!_isInitialized || _bindings == null) {
+      // Stub 模式: NLLB 模型未下载时提供占位翻译
+      debugPrint('[TranslationService] stub 模式 ($fromLang → $toLang)');
+      return _stubTranslate(text, fromLang, toLang);
     }
 
     try {
@@ -55,6 +57,29 @@ class TranslationService {
       debugPrint('[TranslationService] 翻译失败: $e');
       rethrow;
     }
+  }
+
+  /// Stub 翻译 — NLLB 模型未加载时的占位实现
+  String _stubTranslate(String text, String fromLang, String toLang) {
+    // 获取目标语言的可读名称
+    final targetName = _nllbToDisplayName(toLang);
+    return '[$targetName] $text';
+  }
+
+  /// NLLB 代码转显示名称
+  String _nllbToDisplayName(String nllbCode) {
+    const map = {
+      'zho_Hans': '中文',
+      'eng_Latn': 'English',
+      'jpn_Jpan': '日本語',
+      'kor_Hang': '한국어',
+      'fra_Latn': 'Français',
+      'deu_Latn': 'Deutsch',
+      'rus_Cyrl': 'Русский',
+      'spa_Latn': 'Español',
+      'ita_Latn': 'Italiano',
+    };
+    return map[nllbCode] ?? nllbCode;
   }
 
   /// 便捷方法: 使用短语言代码进行翻译
@@ -77,7 +102,6 @@ class TranslationService {
 }
 
 /// NLLB 语言代码映射表
-/// 短代码 -> NLLB-200 格式
 class NllbLanguageMap {
   NllbLanguageMap._();
 
