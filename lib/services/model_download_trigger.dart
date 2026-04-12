@@ -25,7 +25,10 @@ class ModelDownloadTrigger {
     final result = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) => _NllbDownloadDialog(ref: ref),
+      builder: (ctx) => ProviderScope(
+        parent: ProviderScope.containerOf(context),
+        child: const _NllbDownloadDialog(),
+      ),
     );
 
     _isDialogShowing = false;
@@ -40,16 +43,15 @@ class ModelDownloadTrigger {
   }
 }
 
-class _NllbDownloadDialog extends StatefulWidget {
-  final WidgetRef ref;
-
-  const _NllbDownloadDialog({required this.ref});
+class _NllbDownloadDialog extends ConsumerStatefulWidget {
+  const _NllbDownloadDialog();
 
   @override
-  State<_NllbDownloadDialog> createState() => _NllbDownloadDialogState();
+  ConsumerState<_NllbDownloadDialog> createState() =>
+      _NllbDownloadDialogState();
 }
 
-class _NllbDownloadDialogState extends State<_NllbDownloadDialog> {
+class _NllbDownloadDialogState extends ConsumerState<_NllbDownloadDialog> {
   bool _downloading = false;
   bool _completed = false;
   String? _error;
@@ -57,7 +59,6 @@ class _NllbDownloadDialogState extends State<_NllbDownloadDialog> {
   @override
   void initState() {
     super.initState();
-    // 延迟启动下载，避免在 build 期间修改 provider
     Future.microtask(() => _startDownload());
   }
 
@@ -69,7 +70,11 @@ class _NllbDownloadDialogState extends State<_NllbDownloadDialog> {
     });
 
     try {
-      final notifier = widget.ref.read(modelManagerProvider.notifier);
+      final notifier = ref.read(modelManagerProvider.notifier);
+
+      // 确保模型列表已初始化
+      await notifier.ensureInitialized();
+
       await notifier.downloadNllbIfNeeded();
 
       if (mounted) {
@@ -92,9 +97,9 @@ class _NllbDownloadDialogState extends State<_NllbDownloadDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final state = widget.ref.watch(modelManagerProvider);
+    // ConsumerStatefulWidget 的 ref.watch 会自动触发 rebuild
+    final state = ref.watch(modelManagerProvider);
 
-    // 安全查找 NLLB 模型
     ModelInfo nllbModel;
     try {
       nllbModel = state.models.firstWhere(
@@ -122,7 +127,6 @@ class _NllbDownloadDialogState extends State<_NllbDownloadDialog> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Icon
               Icon(
                 _completed
                     ? Icons.check_circle_outline
@@ -137,8 +141,6 @@ class _NllbDownloadDialogState extends State<_NllbDownloadDialog> {
                         : Colors.blue,
               ),
               const SizedBox(height: 16),
-
-              // Title
               Text(
                 _completed
                     ? '翻译引擎已就绪'
@@ -152,15 +154,11 @@ class _NllbDownloadDialogState extends State<_NllbDownloadDialog> {
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 8),
-
-              // Subtitle
               if (!_completed && _error == null)
                 Text(
                   'NLLB-200 ONNX (~${ModelInfo.nllbTotalSizeMB.toStringAsFixed(0)} MB)',
                   style: TextStyle(fontSize: 14, color: Colors.grey[600]),
                 ),
-
-              // Progress bar
               if (_downloading) ...[
                 const SizedBox(height: 16),
                 ClipRRect(
@@ -177,19 +175,18 @@ class _NllbDownloadDialogState extends State<_NllbDownloadDialog> {
                   style: TextStyle(fontSize: 13, color: Colors.grey[500]),
                 ),
               ],
-
-              // Error message (truncated)
               if (_error != null) ...[
                 const SizedBox(height: 8),
                 Text(
-                  _error!.length > 100 ? '${_error!.substring(0, 100)}...' : _error!,
+                  _error!.length > 100
+                      ? '${_error!.substring(0, 100)}...'
+                      : _error!,
                   style: const TextStyle(fontSize: 13, color: Colors.red),
                   textAlign: TextAlign.center,
                   maxLines: 3,
                   overflow: TextOverflow.ellipsis,
                 ),
               ],
-
               const SizedBox(height: 8),
             ],
           ),
@@ -209,7 +206,7 @@ class _NllbDownloadDialogState extends State<_NllbDownloadDialog> {
         if (_downloading)
           TextButton(
             onPressed: () {
-              widget.ref.read(modelManagerProvider.notifier).cancelDownload();
+              ref.read(modelManagerProvider.notifier).cancelDownload();
               Navigator.of(context).pop(false);
             },
             child: const Text('取消'),

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
@@ -47,43 +48,52 @@ class ModelManagerState {
 class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
   final Dio _dio;
   CancelToken? _cancelToken;
-  bool _initialized = false;
+  Completer<void>? _initCompleter;
 
   ModelManagerNotifier()
       : _dio = Dio(),
         super(const ModelManagerState()) {
+    _initCompleter = Completer<void>();
     Future.microtask(() => _initModels());
   }
 
+  /// 等待模型列表初始化完成（可多次调用，安全幂等）
+  Future<void> ensureInitialized() async {
+    if (_initCompleter != null) {
+      await _initCompleter!.future;
+    }
+  }
+
   Future<void> _initModels() async {
-    if (_initialized) return;
-    _initialized = true;
+    try {
+      final modelsDir = await _getModelsDirectory();
+      final List<ModelInfo> checkedModels = [];
 
-    final modelsDir = await _getModelsDirectory();
-    final List<ModelInfo> checkedModels = [];
+      for (final model in ModelInfo.requiredModels) {
+        bool exists;
 
-    for (final model in ModelInfo.requiredModels) {
-      bool exists;
+        if (model.modelType == ModelInfo.nllbModelType) {
+          exists = await _isNllbModelComplete(modelsDir.path);
+        } else if (model.modelType == ModelInfo.whisperModelType) {
+          final file = File(
+              '${modelsDir.path}/${ModelInfo.whisperModelDirName}/${model.fileName}');
+          exists = await file.exists();
+        } else {
+          final file = File('${modelsDir.path}/${model.fileName}');
+          exists = await file.exists();
+        }
 
-      if (model.modelType == ModelInfo.nllbModelType) {
-        exists = await _isNllbModelComplete(modelsDir.path);
-      } else if (model.modelType == ModelInfo.whisperModelType) {
-        // whisper 模型放在 whisper/ 子目录
-        final file = File('${modelsDir.path}/${ModelInfo.whisperModelDirName}/${model.fileName}');
-        exists = await file.exists();
-      } else {
-        final file = File('${modelsDir.path}/${model.fileName}');
-        exists = await file.exists();
+        checkedModels.add(model.copyWith(
+          isDownloaded: exists,
+          downloadProgress: exists ? 1.0 : 0.0,
+        ));
       }
 
-      checkedModels.add(model.copyWith(
-        isDownloaded: exists,
-        downloadProgress: exists ? 1.0 : 0.0,
-      ));
-    }
-
-    if (mounted) {
-      state = state.copyWith(models: checkedModels);
+      if (mounted) {
+        state = state.copyWith(models: checkedModels);
+      }
+    } finally {
+      _initCompleter?.complete();
     }
   }
 
@@ -151,6 +161,7 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
           );
         }
         debugPrint('模型下载失败: $e');
+        rethrow;
       }
     }
   }
@@ -176,10 +187,10 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
     }
   }
 
-  /// 下载 whisper 模型到 whisper/ 子目录
   Future<void> _downloadWhisperModel(ModelInfo modelInfo) async {
     final modelsDir = await _getModelsDirectory();
-    final whisperDir = Directory('${modelsDir.path}/${ModelInfo.whisperModelDirName}');
+    final whisperDir =
+        Directory('${modelsDir.path}/${ModelInfo.whisperModelDirName}');
     if (!await whisperDir.exists()) {
       await whisperDir.create(recursive: true);
     }
@@ -188,8 +199,10 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
 
     if (File(savePath).existsSync()) {
       if (mounted) {
-        _updateModelState(modelInfo.fileName, isDownloaded: true, progress: 1.0);
-        state = state.copyWith(isDownloading: false, downloadingModelName: null);
+        _updateModelState(modelInfo.fileName,
+            isDownloaded: true, progress: 1.0);
+        state =
+            state.copyWith(isDownloading: false, downloadingModelName: null);
       }
       return;
     }
@@ -208,14 +221,16 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
     );
 
     if (mounted) {
-      _updateModelState(modelInfo.fileName, isDownloaded: true, progress: 1.0);
+      _updateModelState(modelInfo.fileName,
+          isDownloaded: true, progress: 1.0);
       state = state.copyWith(isDownloading: false, downloadingModelName: null);
     }
   }
 
   Future<void> _downloadNllbModel(ModelInfo modelInfo) async {
     final modelsDir = await _getModelsDirectory();
-    final nllbDir = Directory('${modelsDir.path}/${ModelInfo.nllbModelDirName}');
+    final nllbDir =
+        Directory('${modelsDir.path}/${ModelInfo.nllbModelDirName}');
     if (!await nllbDir.exists()) {
       await nllbDir.create(recursive: true);
     }
@@ -236,7 +251,8 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
         continue;
       }
 
-      debugPrint('[ModelManager] 下载 NLLB ${i + 1}/${files.length}: ${fileInfo.name}');
+      debugPrint(
+          '[ModelManager] 下载 NLLB ${i + 1}/${files.length}: ${fileInfo.name}');
 
       final baseDownloaded = downloadedSize;
       await _dio.download(
@@ -257,7 +273,8 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
     }
 
     if (mounted) {
-      _updateModelState(modelInfo.fileName, isDownloaded: true, progress: 1.0);
+      _updateModelState(modelInfo.fileName,
+          isDownloaded: true, progress: 1.0);
       state = state.copyWith(isDownloading: false, downloadingModelName: null);
     }
   }
@@ -270,6 +287,7 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
   }
 
   Future<void> downloadAllModels() async {
+    await ensureInitialized();
     for (final model in state.models) {
       if (!model.isDownloaded) {
         await downloadModel(model);
@@ -278,6 +296,7 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
   }
 
   Future<void> downloadNllbIfNeeded() async {
+    await ensureInitialized();
     final nllbModel = state.models.firstWhere(
       (m) => m.modelType == ModelInfo.nllbModelType,
       orElse: () => ModelInfo.requiredModels.last,
@@ -288,6 +307,7 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
   }
 
   Future<void> downloadWhisperIfNeeded() async {
+    await ensureInitialized();
     final whisperModel = state.models.firstWhere(
       (m) => m.modelType == ModelInfo.whisperModelType,
       orElse: () => ModelInfo.requiredModels.first,
