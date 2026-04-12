@@ -48,6 +48,9 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
   Timer? _debounceTimer;
   static const _debounceDuration = Duration(milliseconds: 400);
 
+  /// 上一次的文本内容（用于判断文本是否真正变化，忽略光标移动）
+  String _previousText = '';
+
   @override
   void initState() {
     super.initState();
@@ -121,9 +124,13 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
   void _onTextChanged() {
     final text = _textController.text;
 
+    // 忽略纯光标移动（文本内容未变化）
+    if (text == _previousText) return;
+    _previousText = text;
+
     if (text.isEmpty) {
       _debounceTimer?.cancel();
-      ref.read(conversationProvider.notifier).clearRealtime();
+      ref.read(conversationProvider.notifier).cancelAndClear();
       if (_isCompleted) setState(() => _isCompleted = false);
       setState(() {});
       return;
@@ -150,20 +157,17 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     _textFocusNode.unfocus();
 
     final notifier = ref.read(conversationProvider.notifier);
-    final state = ref.read(conversationProvider);
 
-    if (state.realtimeTranslation.isNotEmpty) {
-      notifier.commitTranslation(text);
-      setState(() => _isCompleted = true);
-    } else {
-      await notifier.sendTextMessage(text);
-      setState(() => _isCompleted = true);
-    }
+    // 取消进行中的翻译，发起最终翻译
+    notifier.cancelTranslation();
+    await notifier.sendTextMessage(text);
+    setState(() => _isCompleted = true);
   }
 
   void _clearAll() {
     _debounceTimer?.cancel();
-    ref.read(conversationProvider.notifier).clearRealtime();
+    ref.read(conversationProvider.notifier).cancelAndClear();
+    _previousText = '';
     setState(() {
       _textController.clear();
       _isCompleted = false;
@@ -222,8 +226,9 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
 
       await _audioService.startRecording();
 
-      ref.read(conversationProvider.notifier).clearRealtime();
+      ref.read(conversationProvider.notifier).cancelAndClear();
 
+      _previousText = '';
       setState(() {
         _isRecording = true;
         _isCompleted = false;
