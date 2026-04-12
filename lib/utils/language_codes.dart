@@ -89,6 +89,24 @@ enum SupportedLanguage {
     whisperCode: 'it',
     flag: '🇮🇹',
     family: LanguageFamily.european,
+  ),
+  thai(
+    code: 'th',
+    displayName: '泰文',
+    nativeName: 'ภาษาไทย',
+    nllbCode: 'tha_Thai',
+    whisperCode: 'th',
+    flag: '🇹🇭',
+    family: LanguageFamily.european,
+  ),
+  vietnamese(
+    code: 'vi',
+    displayName: '越南文',
+    nativeName: 'Tiếng Việt',
+    nllbCode: 'vie_Latn',
+    whisperCode: 'vi',
+    flag: '🇻🇳',
+    family: LanguageFamily.european,
   );
 
   final String code;
