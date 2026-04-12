@@ -77,8 +77,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   /// 翻译请求版本号——每次新请求 +1，旧请求完成时对比，过期则丢弃
   int _translateGeneration = 0;
 
-  /// 当前轮次已检测语种的次数（首次或前 3 次做检测，之后锁定语种方向）
-  int _detectCount = 0;
   /// 已锁定的翻译方向（源 → 目标）
   ({String source, String target})? _lockedDirection;
 
@@ -200,22 +198,20 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     if (mounted) state = state.copyWith(isDetecting: true);
 
     try {
-      // 语种检测：前 3 次做检测，之后锁定方向
+      // 语种检测：仅首次检测，之后锁定方向
       final ({String source, String target}) dir;
-      if (_lockedDirection != null && _detectCount >= 3) {
+      if (_lockedDirection != null) {
         dir = _lockedDirection!;
       } else {
         dir = _detectDirection(text);
-        _detectCount++;
-        if (_detectCount >= 3) {
-          _lockedDirection = dir;
-          debugPrint('[ConversationNotifier] 语种方向已锁定: ${dir.source} → ${dir.target}');
-        }
+        _lockedDirection = dir;
+        debugPrint('[ConversationNotifier] 语种方向已锁定: ${dir.source} → ${dir.target}');
       }
 
       // 检查是否已被新请求取代
       if (gen != _translateGeneration) {
         debugPrint('[ConversationNotifier] 翻译请求已过期 (gen=$gen, current=$_translateGeneration)');
+        // 不更新 isTranslating，由最新请求负责
         return;
       }
 
@@ -243,6 +239,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       state = state.copyWith(
         realtimeTranslation: translated,
         isTranslating: false,
+        isDetecting: false,
       );
     } catch (e) {
       // 只有当前代才更新状态
@@ -262,7 +259,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   /// 取消翻译 + 清空实时状态 + 重置语种锁定
   void cancelAndClear() {
     _translateGeneration++;
-    _detectCount = 0;
     _lockedDirection = null;
     if (mounted) state = state.clearRealtime();
   }
@@ -309,8 +305,13 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         LanguageCodes.getNllbCode(dir.target),
       );
 
-      // 如果被更新的请求取代，丢弃
-      if (gen != _translateGeneration) return;
+      // 如果被另一个 sendTextMessage 取代，丢弃
+      // （注意：detectAndTranslate 不会递增 generation 超过 sendTextMessage 的 gen）
+      if (gen != _translateGeneration) {
+        debugPrint('[ConversationNotifier] sendTextMessage 结果已过期 (gen=$gen, current=$_translateGeneration)');
+        if (mounted) state = state.copyWith(isProcessing: false, isTranslating: false);
+        return;
+      }
 
       final message = Message(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
@@ -326,12 +327,14 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       state = state.copyWith(
         messages: [...state.messages, message],
         isProcessing: false,
+        isTranslating: false,
+        isDetecting: false,
         detectedSourceLang: dir.source,
         detectedTargetLang: dir.target,
         realtimeTranslation: translated,
       );
     } catch (e) {
-      state = state.copyWith(isProcessing: false);
+      state = state.copyWith(isProcessing: false, isTranslating: false, isDetecting: false);
       debugPrint('[ConversationNotifier] sendTextMessage 失败: $e');
     }
   }
@@ -377,6 +380,8 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       state = state.copyWith(
         messages: [...state.messages, message],
         isProcessing: false,
+        isTranslating: false,
+        isDetecting: false,
         detectedSourceLang: dir.source,
         detectedTargetLang: dir.target,
         realtimeTranslation: translated,
