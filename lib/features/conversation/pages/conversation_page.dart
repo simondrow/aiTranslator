@@ -399,6 +399,13 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
 
   void _onLanguageChanged() async {
     await _ensureModelReady();
+    // 切换语言后清空翻译结果，重置语种锁定
+    ref.read(conversationProvider.notifier).cancelAndClear();
+    _previousText = '';
+    setState(() {
+      _isCompleted = false;
+      _textController.clear();
+    });
   }
 
   // ============================================================

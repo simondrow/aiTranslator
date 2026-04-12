@@ -150,10 +150,14 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
   void setMyLanguage(String langCode) {
     state = state.copyWith(myLanguage: langCode);
+    _lockedDirection = null;
+    _lastTranslatingText = '';
   }
 
   void setTheirLanguage(String langCode) {
     state = state.copyWith(theirLanguage: langCode);
+    _lockedDirection = null;
+    _lastTranslatingText = '';
   }
 
   /// 检测语种并确定翻译方向
