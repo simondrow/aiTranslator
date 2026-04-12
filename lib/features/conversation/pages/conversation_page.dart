@@ -34,6 +34,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
   bool _firstInteraction = true;
   bool _isStopping = false; // 正在停止录音中（防止重复停止）
   bool _stopRequested = false; // 录音停止已请求，正在进行的非final ASR应丢弃
+  int _recordingGeneration = 0; // 录音会话版本号，每次新录音/停止/重置时递增
 
   /// 流式 ASR 状态
   Timer? _segmentTimer;
@@ -195,6 +196,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     // 3. 取消所有 ASR 和翻译任务
     _stopRequested = true;
     _isTranscribing = false;
+    _recordingGeneration++; // 使所有残留 ASR 结果过期
     ref.read(conversationProvider.notifier).cancelAndClear();
 
     // 4. 收起键盘
@@ -215,8 +217,13 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
 
   void _onFocusChanged() {
     if (_textFocusNode.hasFocus) {
-      // 获取焦点时刷新 UI（显示 X 按钮）
-      setState(() {});
+      // 获取焦点时退出完成态，进入编辑模式（显示 X 按钮）
+      if (_isCompleted) {
+        debugPrint('[ConversationPage] 输入框获取焦点, 退出完成态');
+        setState(() => _isCompleted = false);
+      } else {
+        setState(() {});
+      }
       return;
     }
 
@@ -276,6 +283,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
         _isCompleted = false;
         _isStopping = false;
         _stopRequested = false;
+        _recordingGeneration++;
         _streamingAsrText = '';
         _textController.text = '';
       });
@@ -353,6 +361,8 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     } finally {
       _isStopping = false;
       _stopRequested = false;
+      _recordingGeneration++; // 递增版本号，使所有残留的 ASR Isolate 结果过期
+      debugPrint('[ConversationPage] 录音会话结束, gen=$_recordingGeneration');
       if (mounted) setState(() {});
     }
   }
@@ -375,9 +385,10 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
   Future<void> _transcribeSegment(String audioPath,
       {bool isFinal = false}) async {
     _isTranscribing = true;
+    final myGen = _recordingGeneration; // 捕获当前录音会话版本
 
     try {
-      // 如果录音已停止且不是最后一段，直接丢弃（加速停止响应）
+      // 如果录音已停止且不是最后一段，直接丢弃
       if (_stopRequested && !isFinal) {
         debugPrint('[ConversationPage] ASR 任务被跳过 (非final段, 录音已停止)');
         return;
@@ -386,9 +397,9 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
       final notifier = ref.read(conversationProvider.notifier);
       final asrResult = await notifier.transcribeAudio(audioPath);
 
-      // ASR 完成后再次检查：如果已请求停止且不是 final，丢弃结果
-      if (_stopRequested && !isFinal) {
-        debugPrint('[ConversationPage] ASR 结果丢弃 (非final段, 录音已停止)');
+      // ASR 完成后检查：录音会话是否已过期（录音已停止/重置/新录音开始）
+      if (myGen != _recordingGeneration) {
+        debugPrint('[ConversationPage] ASR 结果丢弃 (录音会话已过期 gen=$myGen, 当前=$_recordingGeneration): "$asrResult"');
         return;
       }
 
