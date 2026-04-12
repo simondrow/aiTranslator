@@ -16,7 +16,7 @@ def flutterVersionCode = localProperties.getProperty('flutter.versionCode') ?: '
 def flutterVersionName = localProperties.getProperty('flutter.versionName') ?: '1.0'
 
 android {
-    namespace "com.ai.translator"
+    namespace "com.aistudio.ai_translator"
     compileSdk flutter.compileSdkVersion
     ndkVersion flutter.ndkVersion
 
@@ -28,7 +28,7 @@ android {
     kotlinOptions { jvmTarget = '1.8' }
 
     defaultConfig {
-        applicationId "com.ai.translator"
+        applicationId "com.aistudio.ai_translator"
         minSdkVersion 24
         targetSdkVersion flutter.targetSdkVersion
         versionCode flutterVersionCode.toInteger()
