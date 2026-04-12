@@ -42,6 +42,20 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
     _ttsService.initialize();
     _textController.addListener(_onTextChanged);
     _textFocusNode.addListener(_onFocusChanged);
+    // 启动后自动下载 whisper 模型（如尚未下载）
+    Future.microtask(() => _ensureWhisperDownloaded());
+  }
+
+  /// 检查并自动下载 whisper 模型
+  Future<void> _ensureWhisperDownloaded() async {
+    // 等待 modelManager 初始化完成
+    await Future.delayed(const Duration(seconds: 1));
+    if (!mounted) return;
+    final modelState = ref.read(modelManagerProvider);
+    if (!modelState.isWhisperReady && !modelState.isDownloading) {
+      debugPrint('[ConversationPage] 自动触发 whisper 模型下载');
+      ref.read(modelManagerProvider.notifier).downloadWhisperIfNeeded();
+    }
   }
 
   @override
@@ -150,6 +164,13 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
   Future<void> _toggleVoiceRecording() async {
     // 首次点击麦克风触发模型下载
     await _ensureModelReady();
+
+    // 确保 whisper 模型已下载，后台触发下载
+    final modelState = ref.read(modelManagerProvider);
+    if (!modelState.isWhisperReady && !modelState.isDownloading) {
+      debugPrint('[ConversationPage] whisper 模型未就绪，触发后台下载...');
+      ref.read(modelManagerProvider.notifier).downloadWhisperIfNeeded();
+    }
 
     if (_isRecording) {
       setState(() => _isRecording = false);

@@ -76,8 +76,14 @@ class AsrService {
   ///
   /// Whisper 未初始化时返回空结果（stub 模式）。
   Future<AsrResult> transcribe(String audioPath) async {
+    // Lazy init: model may have been downloaded after initial check
     if (!_isInitialized || _bindings == null) {
-      debugPrint('[AsrService] whisper not initialized, returning empty result');
+      debugPrint('[AsrService] not initialized, attempting lazy init...');
+      await tryAutoInitialize();
+    }
+
+    if (!_isInitialized || _bindings == null) {
+      debugPrint('[AsrService] whisper still not initialized, returning empty result');
       return const AsrResult(text: '', detectedLanguage: '');
     }
 
