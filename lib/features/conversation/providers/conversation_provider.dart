@@ -197,14 +197,12 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
     // 去重：文本与上次完全相同且已有翻译结果，跳过
     if (text == _lastTranslatingText && state.realtimeTranslation.isNotEmpty) {
-      debugPrint('[ConversationNotifier] detectAndTranslate 跳过 (文本未变化)');
       return;
     }
 
     // 递增版本号，标记新请求
     final gen = ++_translateGeneration;
     _lastTranslatingText = text;
-    debugPrint('[ConversationNotifier] ▶ detectAndTranslate 开始 (gen=$gen) text="${text.length > 30 ? text.substring(0, 30) + "..." : text}"');
 
     if (mounted) state = state.copyWith(isDetecting: true);
 
@@ -221,7 +219,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
       // 检查是否已被新请求取代
       if (gen != _translateGeneration) {
-        debugPrint('[ConversationNotifier] 翻译请求已过期 (gen=$gen, current=$_translateGeneration)');
         // 不更新 isTranslating，由最新请求负责
         return;
       }
@@ -242,7 +239,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
       // 再次检查：翻译完成时如果 generation 已过期，丢弃结果
       if (gen != _translateGeneration) {
-        debugPrint('[ConversationNotifier] 翻译结果已过期，丢弃 (gen=$gen, current=$_translateGeneration)');
         return;
       }
 
@@ -264,7 +260,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   /// 取消进行中的翻译（递增 generation 使旧结果过期）
   void cancelTranslation() {
     _translateGeneration++;
-    debugPrint('[ConversationNotifier] 取消翻译 (generation=$_translateGeneration)');
   }
 
   /// 取消翻译 + 清空实时状态 + 重置语种锁定
@@ -304,7 +299,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
     // 取消进行中的实时翻译
     final gen = ++_translateGeneration;
-    debugPrint('[ConversationNotifier] ▶ sendTextMessage 开始 (gen=$gen) text="${text.length > 30 ? text.substring(0, 30) + "..." : text}"');
 
     state = state.copyWith(isProcessing: true);
 
@@ -321,7 +315,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       // 如果被另一个 sendTextMessage 取代，丢弃
       // （注意：detectAndTranslate 不会递增 generation 超过 sendTextMessage 的 gen）
       if (gen != _translateGeneration) {
-        debugPrint('[ConversationNotifier] sendTextMessage 结果已过期 (gen=$gen, current=$_translateGeneration)');
         if (mounted) state = state.copyWith(isProcessing: false, isTranslating: false);
         return;
       }
@@ -355,7 +348,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   /// 发送语音消息
   Future<void> sendVoiceMessage(String audioPath) async {
     state = state.copyWith(isProcessing: true);
-    debugPrint('[ConversationNotifier] ▶ sendVoiceMessage 开始 audioPath=$audioPath');
 
     try {
       // ASR: 语音 → 文本
