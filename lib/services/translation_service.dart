@@ -3,14 +3,15 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
-import 'nllb_onnx_translator.dart';
+import 'translation_isolate.dart';
 import '../utils/language_codes.dart';
 
 /// 翻译服务
 /// 使用 NLLB-200-distilled-600M ONNX quantized 模型实现离线翻译。
+/// 翻译在后台 Isolate 中执行，不阻塞 UI 线程。
 /// 模型未加载时使用 stub 返回占位结果。
 class TranslationService {
-  NllbOnnxTranslator? _translator;
+  TranslationIsolate? _isolate;
   bool _isInitialized = false;
   bool _isInitializing = false;
   String? _modelDir;
@@ -18,9 +19,9 @@ class TranslationService {
   bool get isInitialized => _isInitialized;
 
   /// 检查引擎是否真正就绪 (ONNX 模型已加载，非 stub)
-  bool get isEngineReady => _translator?.isReady ?? false;
+  bool get isEngineReady => _isolate?.isReady ?? false;
 
-  /// 初始化 NLLB 模型
+  /// 初始化 NLLB 模型（在后台 Isolate 中加载）
   /// [modelDir] ONNX 模型目录 (包含 encoder/decoder onnx + tokenizer.json)
   Future<void> initialize(String modelDir) async {
     if (_isInitialized && _modelDir == modelDir && isEngineReady) return;
@@ -47,15 +48,23 @@ class TranslationService {
     }
 
     try {
-      _translator = NllbOnnxTranslator();
-      await _translator!.initialize(modelDir);
+      _isolate?.dispose();
+      _isolate = TranslationIsolate();
+      final ok = await _isolate!.initialize(modelDir);
       _isInitialized = true;
-      debugPrint('[TranslationService] NLLB ONNX 模型已加载: $modelDir');
-      debugPrint('[TranslationService] 引擎就绪: ${_translator!.isReady}');
+
+      if (ok) {
+        debugPrint('[TranslationService] NLLB 后台 Isolate 已就绪');
+      } else {
+        debugPrint('[TranslationService] NLLB 初始化失败，将以 stub 模式运行');
+        _isolate?.dispose();
+        _isolate = null;
+      }
     } catch (e) {
       debugPrint('[TranslationService] NLLB 初始化失败: $e');
       debugPrint('[TranslationService] 将以 stub 模式运行');
-      _translator = null;
+      _isolate?.dispose();
+      _isolate = null;
       _isInitialized = true;
     } finally {
       _isInitializing = false;
@@ -85,7 +94,7 @@ class TranslationService {
     return false;
   }
 
-  /// 翻译文本
+  /// 翻译文本（在后台 Isolate 中执行，不阻塞 UI）
   ///
   /// NLLB 未初始化时返回 stub 结果: "[目标语言] 原文"
   Future<String> translate(
@@ -97,14 +106,14 @@ class TranslationService {
       return text;
     }
 
-    if (!_isInitialized || _translator == null || !_translator!.isReady) {
+    if (!_isInitialized || _isolate == null || !_isolate!.isReady) {
       // Stub 模式: NLLB 模型未下载时提供占位翻译
       debugPrint('[TranslationService] stub 模式 ($fromLang → $toLang)');
       return _stubTranslate(text, fromLang, toLang);
     }
 
     try {
-      return await _translator!.translate(text, fromLang, toLang);
+      return await _isolate!.translate(text, fromLang, toLang);
     } catch (e) {
       debugPrint('[TranslationService] 翻译失败: $e');
       return _stubTranslate(text, fromLang, toLang);
@@ -146,8 +155,8 @@ class TranslationService {
 
   /// 释放资源
   void dispose() {
-    _translator?.dispose();
-    _translator = null;
+    _isolate?.dispose();
+    _isolate = null;
     _isInitialized = false;
   }
 }
