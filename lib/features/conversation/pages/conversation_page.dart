@@ -32,6 +32,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
   bool _isRecording = false;
   bool _isCompleted = false;
   bool _firstInteraction = true;
+  bool _isProcessingVoice = false; // 防止录音停止过程中重复点击
 
   /// 流式 ASR 状态
   Timer? _segmentTimer;
@@ -229,11 +230,13 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
       });
     } catch (e) {
       debugPrint('[ConversationPage] Start recording failed: $e');
+      _isProcessingVoice = false;
     }
   }
 
   Future<void> _stopVoiceRecording() async {
     if (!_isRecording) return;
+    _isProcessingVoice = true;
 
     // 停止定时器和动画
     _segmentTimer?.cancel();
@@ -251,7 +254,9 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
       }
 
       // 最终文本
-      final finalText = _streamingAsrText.trim();
+      final finalText = _streamingAsrText
+          .replaceAll(RegExp(r'\[BLANK_AUDIO\]', caseSensitive: false), '')
+          .trim();
       if (finalText.isNotEmpty) {
         // 提交翻译并进入完成态
         final notifier = ref.read(conversationProvider.notifier);
@@ -268,6 +273,9 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
       }
     } catch (e) {
       debugPrint('[ConversationPage] Stop recording failed: $e');
+    } finally {
+      _isProcessingVoice = false;
+      if (mounted) setState(() {});
     }
   }
 
@@ -294,9 +302,15 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
       final notifier = ref.read(conversationProvider.notifier);
       final asrResult = await notifier.transcribeAudio(audioPath);
 
-      if (asrResult.isNotEmpty) {
+      // 过滤 [BLANK_AUDIO] 等无效标记
+      final cleanResult = asrResult
+          .replaceAll(RegExp(r'\[BLANK_AUDIO\]', caseSensitive: false), '')
+          .replaceAll(RegExp(r'\[blank_audio\]'), '')
+          .trim();
+
+      if (cleanResult.isNotEmpty) {
         _streamingAsrText +=
-            (_streamingAsrText.isEmpty ? '' : ' ') + asrResult;
+            (_streamingAsrText.isEmpty ? '' : ' ') + cleanResult;
 
         if (mounted) {
           setState(() {
@@ -321,6 +335,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
   }
 
   void _toggleVoiceRecording() {
+    if (_isProcessingVoice) return; // 防止重复点击
     if (_isRecording) {
       _stopVoiceRecording();
     } else {
@@ -645,12 +660,6 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
               ),
               const SizedBox(height: 16),
 
-              // 录音中显示"转录"标签
-              if (_isRecording) ...[
-                _buildRecordingStatusChip(),
-                const SizedBox(height: 16),
-              ],
-
               // 语言栏（录音时置灰）
               LanguageBar(
                 onLanguageChanged: _onLanguageChanged,
@@ -664,45 +673,6 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
             ],
           ),
         ),
-      ),
-    );
-  }
-
-  /// 录音状态标签
-  Widget _buildRecordingStatusChip() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      decoration: BoxDecoration(
-        color: AppTheme.secondaryBlue.withValues(alpha: 0.8),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: const BoxDecoration(
-              shape: BoxShape.circle,
-              color: Colors.redAccent,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Icon(
-            Icons.record_voice_over,
-            color: Colors.white.withValues(alpha: 0.9),
-            size: 18,
-          ),
-          const SizedBox(width: 6),
-          Text(
-            '转录',
-            style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.9),
-              fontSize: 14,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ],
       ),
     );
   }
