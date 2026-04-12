@@ -26,6 +26,7 @@ Pod::Spec.new do |s|
     "#{whisper_dir}/ggml/src/ggml-alloc.c",
     "#{whisper_dir}/ggml/src/ggml-backend.cpp",
     "#{whisper_dir}/ggml/src/ggml-backend-reg.cpp",
+    "#{whisper_dir}/ggml/src/ggml-backend-dl.cpp",
     "#{whisper_dir}/ggml/src/ggml-backend-dl.h",
     "#{whisper_dir}/ggml/src/ggml-quants.c",
     "#{whisper_dir}/ggml/src/ggml-opt.cpp",
@@ -127,7 +128,7 @@ Pod::Spec.new do |s|
       '"${PODS_TARGET_SRCROOT}/third_party/whisper.cpp/ggml/src/ggml-metal"',
       '"${PODS_TARGET_SRCROOT}/third_party/whisper.cpp/ggml/src/ggml-cpu/llamafile"',
     ].join(' '),
-    'OTHER_CFLAGS' => '-O3 -DNDEBUG'\"1.8.4\"\'',
+    'OTHER_CFLAGS' => '-O3 -DNDEBUG',
     'OTHER_CPLUSPLUSFLAGS' => '-O3 -DNDEBUG -std=c++17',
     'MTL_FAST_MATH' => 'YES',
   }
