@@ -88,11 +88,20 @@ class AsrService {
     }
 
     try {
+      final sw = Stopwatch()..start();
+      debugPrint('[AsrService] transcription started: $audioPath');
+
       // Run transcription in a separate isolate to avoid blocking the UI
       final result = await compute(_transcribeInIsolate, _TranscribeArgs(
         modelPath: _modelPath!,
         audioPath: audioPath,
       ));
+
+      sw.stop();
+      debugPrint('[AsrService] transcription completed in ${sw.elapsedMilliseconds}ms: '
+          '"${result.text.length > 60 ? result.text.substring(0, 60) + "..." : result.text}" '
+          '(lang: ${result.detectedLanguage})');
+
       return result;
     } catch (e) {
       debugPrint('[AsrService] transcription failed: $e');

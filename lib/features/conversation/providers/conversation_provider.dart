@@ -200,13 +200,19 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     }
 
     // 去重：文本与上次完全相同且已有翻译结果，跳过
-    if (text == _lastTranslatingText && state.realtimeTranslation.isNotEmpty) {
+    final cleanText = cleanAsrText(text);
+    if (cleanText.isEmpty) {
+      if (mounted) state = state.clearRealtime();
+      return;
+    }
+    if (cleanText == _lastTranslatingText && state.realtimeTranslation.isNotEmpty) {
+      debugPrint('[ConversationNotifier] 去重跳过 (文本相同): "${cleanText.length > 40 ? cleanText.substring(0, 40) + "..." : cleanText}"');
       return;
     }
 
     // 递增版本号，标记新请求
     final gen = ++_translateGeneration;
-    _lastTranslatingText = text;
+    _lastTranslatingText = cleanText;
 
     if (mounted) state = state.copyWith(isDetecting: true);
 
@@ -235,14 +241,21 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         isTranslating: true,
       );
 
+      debugPrint('[ConversationNotifier] 开始翻译 gen=$gen: "${cleanText.length > 40 ? cleanText.substring(0, 40) + "..." : cleanText}"');
+      final sw = Stopwatch()..start();
+
       final translated = await _translationService.translate(
-        text,
+        cleanText,
         LanguageCodes.getNllbCode(dir.source),
         LanguageCodes.getNllbCode(dir.target),
       );
 
+      sw.stop();
+      debugPrint('[ConversationNotifier] 翻译完成 gen=$gen ${sw.elapsedMilliseconds}ms');
+
       // 再次检查：翻译完成时如果 generation 已过期，丢弃结果
       if (gen != _translateGeneration) {
+        debugPrint('[ConversationNotifier] 翻译结果已过期 gen=$gen (当前: $_translateGeneration), 丢弃');
         return;
       }
 
@@ -310,11 +323,15 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       // sendTextMessage 使用当前锁定方向或重新检测
       final dir = _lockedDirection ?? _detectDirection(text);
 
+      debugPrint('[ConversationNotifier] sendTextMessage 翻译开始 gen=$gen');
+      final sw = Stopwatch()..start();
       final translated = await _translationService.translate(
         text,
         LanguageCodes.getNllbCode(dir.source),
         LanguageCodes.getNllbCode(dir.target),
       );
+      sw.stop();
+      debugPrint('[ConversationNotifier] sendTextMessage 翻译完成 ${sw.elapsedMilliseconds}ms');
 
       // 如果被另一个 sendTextMessage 取代，丢弃
       // （注意：detectAndTranslate 不会递增 generation 超过 sendTextMessage 的 gen）
@@ -406,10 +423,14 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   /// 仅做语音转文字（供流式录音调用）
   Future<String> transcribeAudio(String audioPath) async {
     try {
+      final sw = Stopwatch()..start();
       final asrResult = await _asrService.transcribe(audioPath);
+      sw.stop();
       final text = asrResult.text.trim();
       if (text.isNotEmpty) {
-        debugPrint('[ConversationNotifier] transcribeAudio: "$text"');
+        debugPrint('[ConversationNotifier] transcribeAudio ${sw.elapsedMilliseconds}ms: "$text"');
+      } else {
+        debugPrint('[ConversationNotifier] transcribeAudio ${sw.elapsedMilliseconds}ms: (empty)');
       }
       return text;
     } catch (e) {
@@ -436,6 +457,23 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     if (detected.startsWith(target)) return true;
     if (target.startsWith(detected)) return true;
     return false;
+  }
+
+
+  /// 过滤 whisper 输出中的非语音标记
+  /// [BLANK_AUDIO], [music], [Music], [cow mooing], (music), etc.
+  static final _noiseTokenPattern = RegExp(
+    r'\[(?:BLANK_AUDIO|blank_audio|music|Music|MUSIC|cow mooing|laughter|applause|noise|silence)\]'
+    r'|\((?:music|Music|laughter|applause)\)',
+    caseSensitive: false,
+  );
+
+  /// 清理 ASR 文本：移除噪音标记并整理空格
+  static String cleanAsrText(String text) {
+    return text
+        .replaceAll(_noiseTokenPattern, '')
+        .replaceAll(RegExp(r'\s{2,}'), ' ')
+        .trim();
   }
 }
 

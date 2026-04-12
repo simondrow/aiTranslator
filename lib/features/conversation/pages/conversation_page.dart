@@ -270,10 +270,8 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
         await _transcribeSegment(path, isFinal: true);
       }
 
-      // 最终文本
-      final finalText = _streamingAsrText
-          .replaceAll(RegExp(r'\[BLANK_AUDIO\]', caseSensitive: false), '')
-          .trim();
+      // 最终文本 — 使用统一的噪音过滤
+      final finalText = ConversationNotifier.cleanAsrText(_streamingAsrText);
       if (finalText.isNotEmpty) {
         final notifier = ref.read(conversationProvider.notifier);
         final currentState = ref.read(conversationProvider);
@@ -332,11 +330,8 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
       final notifier = ref.read(conversationProvider.notifier);
       final asrResult = await notifier.transcribeAudio(audioPath);
 
-      // 过滤 [BLANK_AUDIO] 等无效标记
-      final cleanResult = asrResult
-          .replaceAll(RegExp(r'\[BLANK_AUDIO\]', caseSensitive: false), '')
-          .replaceAll(RegExp(r'\[blank_audio\]'), '')
-          .trim();
+      // 过滤 [BLANK_AUDIO], [music], [cow mooing] 等无效标记
+      final cleanResult = ConversationNotifier.cleanAsrText(asrResult);
 
       if (cleanResult.isNotEmpty) {
         _streamingAsrText +=
