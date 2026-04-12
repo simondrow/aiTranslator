@@ -8,7 +8,10 @@ import 'language_selector.dart';
 
 /// 语言选择栏 — 胶囊按钮风格，参考 Google Translate
 class LanguageBar extends ConsumerWidget {
-  const LanguageBar({super.key});
+  /// 语言切换后的回调
+  final VoidCallback? onLanguageChanged;
+
+  const LanguageBar({super.key, this.onLanguageChanged});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -67,6 +70,8 @@ class LanguageBar extends ConsumerWidget {
             notifier.setTheirLanguage(code);
           }
           Navigator.of(context).pop();
+          // 语言切换后触发回调（可用于触发模型下载检查）
+          onLanguageChanged?.call();
         },
       ),
     );

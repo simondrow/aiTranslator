@@ -38,7 +38,7 @@ android {
         externalNativeBuild {
             cmake {
                 arguments '-DAI_BUILD_WHISPER=OFF',
-                          '-DAI_BUILD_NLLB=OFF',
+                          '-DAI_BUILD_NLLB=ON',
                           '-DAI_BUILD_FASTTEXT=ON'
                 cppFlags '-O3 -funroll-loops'
             }

@@ -82,3 +82,10 @@ assets/models/*.ct2
 
 # Exceptions: keep .gitkeep files
 !.gitkeep
+
+# NLLB CTranslate2 model files (large, downloaded at runtime)
+assets/models/nllb-onnx/
+*.ct2/
+
+# SSL debug certificate (not needed in repo)
+all_certs.pem

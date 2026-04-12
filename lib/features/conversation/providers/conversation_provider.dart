@@ -82,17 +82,38 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         _translationService = translationService,
         _languageDetectService = languageDetectService,
         super(const ConversationState()) {
-    _initLanguageDetect();
+    Future.microtask(() => _initServices());
   }
 
-  /// 初始化语种检测（从 assets 复制模型并加载）
-  Future<void> _initLanguageDetect() async {
+  /// 初始化语种检测 + 尝试自动加载翻译引擎
+  Future<void> _initServices() async {
     try {
       await _languageDetectService.initialize();
       debugPrint('[ConversationNotifier] 语种检测服务初始化完成');
     } catch (e) {
       debugPrint('[ConversationNotifier] 语种检测初始化失败: $e');
       debugPrint('[ConversationNotifier] 将使用后备检测逻辑');
+    }
+
+    // 尝试自动初始化翻译引擎（如果模型已下载）
+    try {
+      final ready = await _translationService.tryAutoInitialize();
+      debugPrint('[ConversationNotifier] 翻译引擎自动初始化: ${ready ? "成功" : "未就绪 (stub 模式)"}');
+    } catch (e) {
+      debugPrint('[ConversationNotifier] 翻译引擎自动初始化失败: $e');
+    }
+  }
+
+  /// 翻译引擎是否真正就绪
+  bool get isTranslationReady => _translationService.isEngineReady;
+
+  /// 手动初始化翻译引擎 (模型下载完成后调用)
+  Future<void> initTranslationEngine(String modelDir) async {
+    try {
+      await _translationService.initialize(modelDir);
+      debugPrint('[ConversationNotifier] 翻译引擎手动初始化: ${_translationService.isEngineReady}');
+    } catch (e) {
+      debugPrint('[ConversationNotifier] 翻译引擎手动初始化失败: $e');
     }
   }
 
@@ -105,15 +126,43 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   }
 
   /// 检测语种并确定翻译方向
-  /// 限制结果为 myLanguage / theirLanguage 二选一
+  ///
+  /// 策略:
+  ///   1. 精确匹配: 检测结果 == myLanguage 或 theirLanguage → 直接使用
+  ///   2. 语言族归属: 检测到非主页面语言时 (如法语/德语)，按语言族归类:
+  ///      - CJK 族 (中/日/韩) → 归为界面中属于 CJK 的那一侧
+  ///      - 欧洲族 (英/法/德/俄/西/意等) → 归为界面中属于欧洲的那一侧
+  ///      例: 界面是 中文↔英文，输入法语 → 法语∈欧洲族 → 归为英文侧 → 翻译为中文
+  ///      例: 界面是 中文↔英文，输入日语 → 日语∈CJK族 → 归为中文侧 → 翻译为英文
   ({String source, String target}) _detectDirection(String text) {
     final detectResult = _languageDetectService.detectLanguage(text);
     final rawLang = detectResult.languageCode;
 
+    // 1. 精确匹配
+    if (_matchesLanguage(rawLang, state.myLanguage)) {
+      return (source: state.myLanguage, target: state.theirLanguage);
+    }
     if (_matchesLanguage(rawLang, state.theirLanguage)) {
       return (source: state.theirLanguage, target: state.myLanguage);
     }
-    // 默认: 识别为 myLanguage（包括无法识别时）
+
+    // 2. 语言族归属
+    final detectedFamily = LanguageCodes.getFamily(rawLang);
+    final myFamily = LanguageCodes.getFamily(state.myLanguage);
+    final theirFamily = LanguageCodes.getFamily(state.theirLanguage);
+
+    if (detectedFamily == theirFamily && detectedFamily != myFamily) {
+      // 检测语言和"对方语言"同族 → 视为对方语言，翻译为我方语言
+      debugPrint('[ConversationNotifier] 语言族归属: $rawLang → ${state.theirLanguage} 侧 (同族: $detectedFamily)');
+      return (source: state.theirLanguage, target: state.myLanguage);
+    }
+    if (detectedFamily == myFamily && detectedFamily != theirFamily) {
+      // 检测语言和"我方语言"同族 → 视为我方语言，翻译为对方语言
+      debugPrint('[ConversationNotifier] 语言族归属: $rawLang → ${state.myLanguage} 侧 (同族: $detectedFamily)');
+      return (source: state.myLanguage, target: state.theirLanguage);
+    }
+
+    // 两者同族或都不匹配: 默认为 myLanguage → theirLanguage
     return (source: state.myLanguage, target: state.theirLanguage);
   }
 

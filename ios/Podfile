@@ -31,6 +31,9 @@ target 'Runner' do
 
   # fastText 语种检测原生库
   pod 'AiFasttext', :path => '../native'
+
+  # NLLB CTranslate2 翻译原生库 (当前 stub 模式)
+  pod 'AiNllb', :path => '../native'
 end
 
 post_install do |installer|
@@ -41,18 +44,28 @@ post_install do |installer|
     end
   end
 
-  # Replace "-framework AiFasttext" with "-force_load ..." in Pods-Runner xcconfigs
-  # so that ai_fasttext_* C symbols survive dead-stripping for DynamicLibrary.process()
+  # Replace "-framework AiFasttext" / "-framework AiNllb" with "-force_load ..."
+  # in Pods-Runner xcconfigs so that C symbols survive dead-stripping for DynamicLibrary.process()
+  native_pods = ['AiFasttext', 'AiNllb']
   Dir.glob(File.join(installer.sandbox.root, 'Target Support Files', 'Pods-Runner', '*.xcconfig')).each do |xcconfig_path|
     content = File.read(xcconfig_path)
-    if content.include?('-framework "AiFasttext"') || content.include?('-framework AiFasttext')
-      content.gsub!('-framework "AiFasttext"', '')
-      content.gsub!('-framework AiFasttext', '')
-      # Add force_load after existing OTHER_LDFLAGS
-      content.gsub!(/(OTHER_LDFLAGS\s*=\s*.*)$/) do |match|
-        "#{match} -force_load \"${PODS_CONFIGURATION_BUILD_DIR}/AiFasttext/AiFasttext.framework/AiFasttext\""
+    modified = false
+
+    native_pods.each do |pod_name|
+      if content.include?("-framework \"#{pod_name}\"") || content.include?("-framework #{pod_name}")
+        content.gsub!("-framework \"#{pod_name}\"", '')
+        content.gsub!("-framework #{pod_name}", '')
+        # Add force_load after existing OTHER_LDFLAGS
+        force_load_flag = "-force_load \"${PODS_CONFIGURATION_BUILD_DIR}/#{pod_name}/#{pod_name}.framework/#{pod_name}\""
+        unless content.include?(force_load_flag)
+          content.gsub!(/(OTHER_LDFLAGS\s*=\s*.*)$/) do |match|
+            "#{match} #{force_load_flag}"
+          end
+        end
+        modified = true
       end
-      File.write(xcconfig_path, content)
     end
+
+    File.write(xcconfig_path, content) if modified
   end
 end

@@ -2,13 +2,18 @@ import 'dart:ffi';
 import 'dart:io';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart';
 
 // ============================================================
 // NLLB (CTranslate2) FFI 绑定
-// 绑定 native/bridge/nllb_bridge.c 中暴露的简化 C API
+// 绑定 native/bridge/nllb_bridge.cpp 中暴露的 C API
 //
-// 注意: CTranslate2 本身是 C++ 库，nllb_bridge.c 是对其进行
-// C 封装的桥接层，以便 dart:ffi 调用。
+// API:
+//   ai_nllb_init(model_dir, sp_model_path) → ctx
+//   ai_nllb_translate(ctx, text, src_lang, tgt_lang) → char*
+//   ai_nllb_free_string(char*)
+//   ai_nllb_free(ctx)
+//   ai_nllb_is_ready(ctx) → int
 // ============================================================
 
 // ---- Native 类型定义 ----
@@ -18,11 +23,13 @@ final class AINllbContext extends Opaque {}
 
 // ---- Native 函数类型定义 ----
 
+// ai_nllb_init(const char* model_dir, const char* sp_model_path)
 typedef AINllbInitNative = Pointer<AINllbContext> Function(
-    Pointer<Utf8> modelPath);
+    Pointer<Utf8> modelDir, Pointer<Utf8> spModelPath);
 typedef AINllbInit = Pointer<AINllbContext> Function(
-    Pointer<Utf8> modelPath);
+    Pointer<Utf8> modelDir, Pointer<Utf8> spModelPath);
 
+// ai_nllb_translate(ctx, text, src_lang, tgt_lang)
 typedef AINllbTranslateNative = Pointer<Utf8> Function(
   Pointer<AINllbContext> ctx,
   Pointer<Utf8> text,
@@ -42,6 +49,9 @@ typedef AINllbFree = void Function(Pointer<AINllbContext> ctx);
 typedef AINllbFreeStringNative = Void Function(Pointer<Utf8> str);
 typedef AINllbFreeString = void Function(Pointer<Utf8> str);
 
+typedef AINllbIsReadyNative = Int32 Function(Pointer<AINllbContext> ctx);
+typedef AINllbIsReady = int Function(Pointer<AINllbContext> ctx);
+
 /// NLLB FFI 绑定封装
 class NllbBindings {
   late final DynamicLibrary _lib;
@@ -51,6 +61,7 @@ class NllbBindings {
   late final AINllbTranslate _translateFn;
   late final AINllbFree _freeFn;
   late final AINllbFreeString _freeStringFn;
+  late final AINllbIsReady _isReadyFn;
 
   NllbBindings() {
     _lib = _loadLibrary();
@@ -64,17 +75,36 @@ class NllbBindings {
         .lookup<NativeFunction<AINllbFreeNative>>('ai_nllb_free')
         .asFunction<AINllbFree>();
     _freeStringFn = _lib
-        .lookup<NativeFunction<AINllbFreeStringNative>>(
-            'ai_nllb_free_string')
+        .lookup<NativeFunction<AINllbFreeStringNative>>('ai_nllb_free_string')
         .asFunction<AINllbFreeString>();
+    _isReadyFn = _lib
+        .lookup<NativeFunction<AINllbIsReadyNative>>('ai_nllb_is_ready')
+        .asFunction<AINllbIsReady>();
   }
 
-  /// 加载动态库
+  /// 加载动态库 — 三级 iOS fallback (与 fastText 同模式)
   static DynamicLibrary _loadLibrary() {
     if (Platform.isAndroid) {
       return DynamicLibrary.open('libai_nllb.so');
     } else if (Platform.isIOS || Platform.isMacOS) {
-      return DynamicLibrary.process();
+      // Level 1: DynamicLibrary.process() — symbols linked into main binary
+      try {
+        final lib = DynamicLibrary.process();
+        lib.lookup('ai_nllb_init'); // probe
+        return lib;
+      } catch (_) {
+        debugPrint('[NllbBindings] process() lookup failed, trying executable()');
+      }
+      // Level 2: DynamicLibrary.executable()
+      try {
+        final lib = DynamicLibrary.executable();
+        lib.lookup('ai_nllb_init'); // probe
+        return lib;
+      } catch (_) {
+        debugPrint('[NllbBindings] executable() lookup failed, trying Runner.debug.dylib');
+      }
+      // Level 3: Flutter debug dylib
+      return DynamicLibrary.open('Runner.debug.dylib');
     } else if (Platform.isLinux) {
       return DynamicLibrary.open('libai_nllb.so');
     } else if (Platform.isWindows) {
@@ -84,16 +114,26 @@ class NllbBindings {
   }
 
   /// 初始化 NLLB 模型
-  void init(String modelPath) {
-    final pathPtr = modelPath.toNativeUtf8();
+  /// [modelDir] CTranslate2 模型目录 (包含 model.bin 等)
+  /// [spModelPath] sentencepiece.bpe.model 路径
+  void init(String modelDir, String spModelPath) {
+    final dirPtr = modelDir.toNativeUtf8();
+    final spPtr = spModelPath.toNativeUtf8();
     try {
-      _ctx = _initFn(pathPtr);
+      _ctx = _initFn(dirPtr, spPtr);
       if (_ctx == null || _ctx == nullptr) {
-        throw Exception('NLLB 模型初始化失败: $modelPath');
+        throw Exception('NLLB 模型初始化失败: $modelDir');
       }
     } finally {
-      calloc.free(pathPtr);
+      calloc.free(dirPtr);
+      calloc.free(spPtr);
     }
+  }
+
+  /// 检查引擎是否真正就绪 (非 stub 模式)
+  bool get isReady {
+    if (_ctx == null || _ctx == nullptr) return false;
+    return _isReadyFn(_ctx!) != 0;
   }
 
   /// 翻译文本

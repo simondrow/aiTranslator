@@ -7,7 +7,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../app/theme.dart';
 import '../../../services/audio_service.dart';
 import '../../../services/tts_service.dart';
+import '../../../services/model_download_trigger.dart';
 import '../../../utils/language_codes.dart';
+import '../../model_manager/providers/model_manager_provider.dart';
 import '../providers/conversation_provider.dart';
 import '../widgets/language_bar.dart';
 import 'conversation_mode_page.dart';
@@ -28,6 +30,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
 
   bool _isRecording = false;
   bool _isCompleted = false;
+  bool _firstInteraction = true; // 首次交互触发下载
 
   /// 防抖定时器 — 用户停顿后触发检测+翻译
   Timer? _debounceTimer;
@@ -38,17 +41,45 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
     super.initState();
     _ttsService.initialize();
     _textController.addListener(_onTextChanged);
+    _textFocusNode.addListener(_onFocusChanged);
   }
 
   @override
   void dispose() {
     _debounceTimer?.cancel();
     _textController.removeListener(_onTextChanged);
+    _textFocusNode.removeListener(_onFocusChanged);
     _textController.dispose();
     _textFocusNode.dispose();
     _audioService.dispose();
     _ttsService.dispose();
     super.dispose();
+  }
+
+  /// 首次用户交互时触发模型下载检查
+  /// 触发条件: 首次输入文字、点击麦克风、切换语言
+  Future<bool> _ensureModelReady() async {
+    if (!_firstInteraction) return true;
+    _firstInteraction = false;
+
+    final notifier = ref.read(conversationProvider.notifier);
+
+    // 如果翻译引擎已就绪，无需下载
+    if (notifier.isTranslationReady) return true;
+
+    // 弹出下载对话框
+    final ready = await ModelDownloadTrigger.ensureNllbReady(context, ref);
+
+    if (ready) {
+      // 下载完成，初始化翻译引擎
+      final modelDir = await ref.read(modelManagerProvider.notifier).getNllbModelDir();
+      await notifier.initTranslationEngine(modelDir);
+    } else {
+      // 用户取消下载，允许再次触发
+      _firstInteraction = true;
+    }
+
+    return ready;
   }
 
   /// 文字输入回调 — 带防抖的实时检测+翻译
@@ -73,9 +104,11 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
 
     // 防抖: 用户停止输入 400ms 后触发检测+翻译
     _debounceTimer?.cancel();
-    _debounceTimer = Timer(_debounceDuration, () {
+    _debounceTimer = Timer(_debounceDuration, () async {
       final currentText = _textController.text.trim();
       if (currentText.isNotEmpty) {
+        // 首次输入触发模型下载
+        await _ensureModelReady();
         ref.read(conversationProvider.notifier).detectAndTranslate(currentText);
       }
     });
@@ -115,6 +148,9 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
   }
 
   Future<void> _toggleVoiceRecording() async {
+    // 首次点击麦克风触发模型下载
+    await _ensureModelReady();
+
     if (_isRecording) {
       setState(() => _isRecording = false);
       try {
@@ -170,6 +206,37 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
     if (state.realtimeTranslation.isEmpty) return;
     final lang = state.detectedTargetLang ?? state.theirLanguage;
     _ttsService.speak(state.realtimeTranslation, lang);
+  }
+
+  /// 语言切换时触发模型下载
+  void _onLanguageChanged() async {
+    await _ensureModelReady();
+  }
+
+  /// 输入框失焦 → 视为输入完成，进入双语展示+发音界面
+  void _onFocusChanged() {
+    if (_textFocusNode.hasFocus) return; // 获焦时忽略
+
+    final text = _textController.text.trim();
+    if (text.isEmpty) return;
+    if (_isCompleted) return; // 已经是完成态
+
+    _debounceTimer?.cancel();
+
+    final state = ref.read(conversationProvider);
+    final notifier = ref.read(conversationProvider.notifier);
+
+    if (state.realtimeTranslation.isNotEmpty) {
+      // 已有翻译结果 → 直接提交
+      notifier.commitTranslation(text);
+      setState(() => _isCompleted = true);
+    } else if (!state.isTranslating && !state.isDetecting) {
+      // 尚无翻译且未在处理 → 发起完整翻译流程后进入完成态
+      notifier.sendTextMessage(text).then((_) {
+        if (mounted) setState(() => _isCompleted = true);
+      });
+    }
+    // 如果正在翻译中，等翻译完成后再由用户操作
   }
 
   @override
@@ -432,7 +499,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
                 ),
               ),
               const SizedBox(height: 16),
-              const LanguageBar(),
+              LanguageBar(onLanguageChanged: _onLanguageChanged),
               const SizedBox(height: 20),
               GestureDetector(
                 onTap: _toggleVoiceRecording,

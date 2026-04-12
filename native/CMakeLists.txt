@@ -5,7 +5,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
 # ============================================================
-# 构建选项
+# Build options
 # ============================================================
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(AI_BUILD_WHISPER "Build whisper.cpp bridge" ON)
@@ -13,7 +13,7 @@ option(AI_BUILD_NLLB "Build NLLB/CTranslate2 bridge" ON)
 option(AI_BUILD_FASTTEXT "Build fastText bridge" ON)
 
 # ============================================================
-# whisper.cpp 桥接库
+# whisper.cpp bridge
 # ============================================================
 if(AI_BUILD_WHISPER)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/CMakeLists.txt)
@@ -35,22 +35,40 @@ if(AI_BUILD_WHISPER)
 endif()
 
 # ============================================================
-# NLLB / CTranslate2 桥接库
+# NLLB / CTranslate2 bridge
 # ============================================================
 if(AI_BUILD_NLLB)
+    set(CTRANSLATE2_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/CTranslate2)
+    set(SENTENCEPIECE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sentencepiece)
+
     add_library(ai_nllb SHARED
-        bridge/nllb_bridge.c
+        bridge/nllb_bridge.cpp
     )
-    target_include_directories(ai_nllb PRIVATE
-        bridge
-    )
+    target_include_directories(ai_nllb PRIVATE bridge)
+    set_target_properties(ai_nllb PROPERTIES CXX_STANDARD 17)
+
+    # If CTranslate2 and SentencePiece are built and available
+    if(EXISTS ${CTRANSLATE2_DIR}/lib/libctranslate2.a AND
+       EXISTS ${SENTENCEPIECE_DIR}/lib/libsentencepiece.a)
+        target_include_directories(ai_nllb PRIVATE
+            ${CTRANSLATE2_DIR}/include
+            ${SENTENCEPIECE_DIR}/include
+        )
+        target_link_libraries(ai_nllb PRIVATE
+            ${CTRANSLATE2_DIR}/lib/libctranslate2.a
+            ${SENTENCEPIECE_DIR}/lib/libsentencepiece.a
+        )
+        target_compile_definitions(ai_nllb PRIVATE AI_HAS_CTRANSLATE2)
+        message(STATUS "NLLB: CTranslate2 + SentencePiece found")
+    else()
+        message(WARNING "CTranslate2/SentencePiece not found, NLLB in stub mode")
+    endif()
 endif()
 
 # ============================================================
-# fastText 桥接库
+# fastText bridge
 # ============================================================
 if(AI_BUILD_FASTTEXT)
-    # fastText 源文件 — 编译为静态库直接链接
     set(FASTTEXT_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fastText/src)
 
     if(EXISTS ${FASTTEXT_SRC_DIR}/fasttext.cc)
@@ -76,10 +94,8 @@ if(AI_BUILD_FASTTEXT)
             POSITION_INDEPENDENT_CODE ON
             CXX_STANDARD 17
         )
-        # 移除 -march=native (不适用于交叉编译)
         target_compile_options(fasttext_core PRIVATE -O3 -funroll-loops)
 
-        # 桥接库 (C++ 源文件)
         add_library(ai_fasttext SHARED
             bridge/fasttext_bridge.cpp
         )
@@ -94,22 +110,9 @@ if(AI_BUILD_FASTTEXT)
         )
     else()
         message(WARNING "fastText source not found at ${FASTTEXT_SRC_DIR}")
-
-        # 仅编译 stub 桥接
         add_library(ai_fasttext SHARED
             bridge/fasttext_bridge.cpp
         )
         target_include_directories(ai_fasttext PRIVATE bridge)
     endif()
 endif()
-
-# ============================================================
-# 安装规则
-# ============================================================
-install(TARGETS
-    $<$<TARGET_EXISTS:ai_whisper>:ai_whisper>
-    $<$<TARGET_EXISTS:ai_nllb>:ai_nllb>
-    $<$<TARGET_EXISTS:ai_fasttext>:ai_fasttext>
-    LIBRARY DESTINATION lib
-    RUNTIME DESTINATION bin
-)
