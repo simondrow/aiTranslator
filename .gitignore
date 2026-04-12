@@ -65,7 +65,13 @@ app.*.map.json
 
 # Native build artifacts
 /native/build/
-/native/third_party/
+# Native third_party build artifacts (keep source, ignore builds)
+/native/third_party/whisper.cpp/build*/
+/native/third_party/whisper.cpp/examples/
+/native/third_party/whisper.cpp/bindings/
+/native/third_party/whisper.cpp/tests/
+/native/third_party/whisper.cpp/samples/
+/native/third_party/whisper.cpp/models/*.bin
 
 # AI model files (large binaries, download at runtime)
 assets/models/*.bin
@@ -85,6 +91,7 @@ assets/models/*.ct2
 
 # NLLB CTranslate2 model files (large, downloaded at runtime)
 assets/models/nllb-onnx/
+assets/models/whisper/
 *.ct2/
 
 # SSL debug certificate (not needed in repo)

@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
-# Push NLLB ONNX models to iOS Simulator app Documents
+# Push NLLB ONNX + Whisper models to iOS Simulator app Documents
 # Usage: bash scripts/push_models_to_sim.sh
 set -e
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-MODEL_SRC="$SCRIPT_DIR/../assets/models/nllb-onnx"
-
-if [ ! -f "$MODEL_SRC/encoder_model_quantized.onnx" ]; then
-  echo "ERROR: models missing. Run scripts/download_nllb_model.sh first"
-  exit 1
-fi
+NLLB_SRC="$SCRIPT_DIR/../assets/models/nllb-onnx"
+WHISPER_SRC="$SCRIPT_DIR/../assets/models/whisper"
 
 APP_ID="com.aistudio.aiTranslator"
 BOOTED_SIM=$(xcrun simctl list devices booted -j | python3 -c "
@@ -27,18 +23,51 @@ echo "Sim: $BOOTED_SIM"
 APP_CONTAINER=$(xcrun simctl get_app_container "$BOOTED_SIM" "$APP_ID" data 2>/dev/null || echo "")
 if [ -z "$APP_CONTAINER" ]; then echo "App not installed. Run flutter run first"; exit 1; fi
 
-DEST="$APP_CONTAINER/Documents/models/nllb-onnx"
-mkdir -p "$DEST"
-echo "Source: $MODEL_SRC"
-echo "Target: $DEST"
+echo "App container: $APP_CONTAINER"
 
-for f in encoder_model_quantized.onnx decoder_model_merged_quantized.onnx tokenizer.json; do
-  if [ -f "$DEST/$f" ]; then
-    S1=$(stat -f%z "$MODEL_SRC/$f"); S2=$(stat -f%z "$DEST/$f")
-    if [ "$S1" = "$S2" ]; then echo "  SKIP $f"; continue; fi
-  fi
-  echo "  COPY $f ..."
-  cp "$MODEL_SRC/$f" "$DEST/$f"
-done
+# ---- NLLB ONNX models ----
+if [ -f "$NLLB_SRC/encoder_model_quantized.onnx" ]; then
+  DEST="$APP_CONTAINER/Documents/models/nllb-onnx"
+  mkdir -p "$DEST"
+  echo ""
+  echo "=== NLLB ONNX Models ==="
+  echo "Source: $NLLB_SRC"
+  echo "Target: $DEST"
 
-echo "Done! Restart app to skip download."
+  for f in encoder_model_quantized.onnx decoder_model_merged_quantized.onnx tokenizer.json; do
+    if [ -f "$DEST/$f" ]; then
+      S1=$(stat -f%z "$NLLB_SRC/$f"); S2=$(stat -f%z "$DEST/$f")
+      if [ "$S1" = "$S2" ]; then echo "  SKIP $f"; continue; fi
+    fi
+    echo "  COPY $f ..."
+    cp "$NLLB_SRC/$f" "$DEST/$f"
+  done
+else
+  echo "NLLB models not found — run: bash scripts/download_nllb_model.sh"
+fi
+
+# ---- Whisper model ----
+WHISPER_MODEL=$(ls "$WHISPER_SRC"/ggml-*.bin 2>/dev/null | head -1)
+if [ -n "$WHISPER_MODEL" ]; then
+  DEST="$APP_CONTAINER/Documents/models/whisper"
+  mkdir -p "$DEST"
+  echo ""
+  echo "=== Whisper Model ==="
+  echo "Source: $WHISPER_SRC"
+  echo "Target: $DEST"
+
+  for f in "$WHISPER_SRC"/ggml-*.bin; do
+    fname=$(basename "$f")
+    if [ -f "$DEST/$fname" ]; then
+      S1=$(stat -f%z "$f"); S2=$(stat -f%z "$DEST/$fname")
+      if [ "$S1" = "$S2" ]; then echo "  SKIP $fname"; continue; fi
+    fi
+    echo "  COPY $fname ..."
+    cp "$f" "$DEST/$fname"
+  done
+else
+  echo "Whisper model not found — run: bash scripts/download_whisper_model.sh"
+fi
+
+echo ""
+echo "Done! Restart app (press R) to pick up the models."

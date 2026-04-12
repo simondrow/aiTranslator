@@ -39,6 +39,9 @@ class ModelManagerState {
 
   bool get isNllbReady =>
       models.any((m) => m.modelType == ModelInfo.nllbModelType && m.isDownloaded);
+
+  bool get isWhisperReady =>
+      models.any((m) => m.modelType == ModelInfo.whisperModelType && m.isDownloaded);
 }
 
 class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
@@ -49,7 +52,6 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
   ModelManagerNotifier()
       : _dio = Dio(),
         super(const ModelManagerState()) {
-    // 延迟初始化，避免在 widget build 期间修改 provider state
     Future.microtask(() => _initModels());
   }
 
@@ -65,6 +67,10 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
 
       if (model.modelType == ModelInfo.nllbModelType) {
         exists = await _isNllbModelComplete(modelsDir.path);
+      } else if (model.modelType == ModelInfo.whisperModelType) {
+        // whisper 模型放在 whisper/ 子目录
+        final file = File('${modelsDir.path}/${ModelInfo.whisperModelDirName}/${model.fileName}');
+        exists = await file.exists();
       } else {
         final file = File('${modelsDir.path}/${model.fileName}');
         exists = await file.exists();
@@ -109,6 +115,11 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
     return '${modelsDir.path}/${ModelInfo.nllbModelDirName}';
   }
 
+  Future<String> getWhisperModelPath() async {
+    final modelsDir = await _getModelsDirectory();
+    return '${modelsDir.path}/${ModelInfo.whisperModelDirName}/${ModelInfo.whisperModelFileName}';
+  }
+
   bool isModelReady() => state.allModelsReady;
 
   Future<void> downloadModel(ModelInfo modelInfo) async {
@@ -123,6 +134,8 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
     try {
       if (modelInfo.modelType == ModelInfo.nllbModelType) {
         await _downloadNllbModel(modelInfo);
+      } else if (modelInfo.modelType == ModelInfo.whisperModelType) {
+        await _downloadWhisperModel(modelInfo);
       } else {
         await _downloadSingleFile(modelInfo);
       }
@@ -145,6 +158,43 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
   Future<void> _downloadSingleFile(ModelInfo modelInfo) async {
     final modelsDir = await _getModelsDirectory();
     final savePath = '${modelsDir.path}/${modelInfo.fileName}';
+
+    await _dio.download(
+      modelInfo.url,
+      savePath,
+      cancelToken: _cancelToken,
+      onReceiveProgress: (received, total) {
+        if (total > 0 && mounted) {
+          _updateModelProgress(modelInfo.fileName, received / total);
+        }
+      },
+    );
+
+    if (mounted) {
+      _updateModelState(modelInfo.fileName, isDownloaded: true, progress: 1.0);
+      state = state.copyWith(isDownloading: false, downloadingModelName: null);
+    }
+  }
+
+  /// 下载 whisper 模型到 whisper/ 子目录
+  Future<void> _downloadWhisperModel(ModelInfo modelInfo) async {
+    final modelsDir = await _getModelsDirectory();
+    final whisperDir = Directory('${modelsDir.path}/${ModelInfo.whisperModelDirName}');
+    if (!await whisperDir.exists()) {
+      await whisperDir.create(recursive: true);
+    }
+
+    final savePath = '${whisperDir.path}/${modelInfo.fileName}';
+
+    if (File(savePath).existsSync()) {
+      if (mounted) {
+        _updateModelState(modelInfo.fileName, isDownloaded: true, progress: 1.0);
+        state = state.copyWith(isDownloading: false, downloadingModelName: null);
+      }
+      return;
+    }
+
+    debugPrint('[ModelManager] 下载 Whisper: ${modelInfo.fileName}');
 
     await _dio.download(
       modelInfo.url,
@@ -234,6 +284,16 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
     );
     if (!nllbModel.isDownloaded) {
       await downloadModel(nllbModel);
+    }
+  }
+
+  Future<void> downloadWhisperIfNeeded() async {
+    final whisperModel = state.models.firstWhere(
+      (m) => m.modelType == ModelInfo.whisperModelType,
+      orElse: () => ModelInfo.requiredModels.first,
+    );
+    if (!whisperModel.isDownloaded) {
+      await downloadModel(whisperModel);
     }
   }
 

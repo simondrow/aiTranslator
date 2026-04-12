@@ -39,8 +39,10 @@ class ModelInfo {
     );
   }
 
-  /// NLLB ONNX quantized 模型
-  /// 来源: HuggingFace Xenova/nllb-200-distilled-600M
+  // =============================================================
+  // NLLB ONNX quantized 翻译模型
+  // 来源: HuggingFace Xenova/nllb-200-distilled-600M
+  // =============================================================
   static const String nllbModelType = 'nllb-onnx';
   static const String nllbModelDirName = 'nllb-onnx';
 
@@ -67,16 +69,24 @@ class ModelInfo {
   static double get nllbTotalSizeMB =>
       nllbModelFiles.fold(0, (sum, f) => sum + f.sizeInMB);
 
+  // =============================================================
+  // Whisper 语音识别模型
+  // 来源: HuggingFace ggerganov/whisper.cpp
+  // =============================================================
+  static const String whisperModelType = 'whisper';
+  static const String whisperModelDirName = 'whisper';
+  static const String whisperModelFileName = 'ggml-base.bin';
+
   /// 需要下载的模型列表
   /// 注意: fastText lid.176.ftz (917KB) 已打包在 assets 中，无需下载
   static List<ModelInfo> get requiredModels => [
         const ModelInfo(
-          name: 'Whisper Small',
+          name: 'Whisper Base (multilingual)',
           url:
-              'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin',
-          fileName: 'ggml-small.bin',
-          sizeInMB: 466,
-          modelType: 'whisper',
+              'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin',
+          fileName: whisperModelFileName,
+          sizeInMB: 148,
+          modelType: whisperModelType,
         ),
         ModelInfo(
           name: 'NLLB-200 ONNX (quantized)',

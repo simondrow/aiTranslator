@@ -85,8 +85,9 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     Future.microtask(() => _initServices());
   }
 
-  /// 初始化语种检测 + 尝试自动加载翻译引擎
+  /// 初始化语种检测 + 翻译引擎 + ASR 引擎
   Future<void> _initServices() async {
+    // 1. 语种检测
     try {
       await _languageDetectService.initialize();
       debugPrint('[ConversationNotifier] 语种检测服务初始化完成');
@@ -95,17 +96,28 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       debugPrint('[ConversationNotifier] 将使用后备检测逻辑');
     }
 
-    // 尝试自动初始化翻译引擎（如果模型已下载）
+    // 2. 翻译引擎
     try {
       final ready = await _translationService.tryAutoInitialize();
       debugPrint('[ConversationNotifier] 翻译引擎自动初始化: ${ready ? "成功" : "未就绪 (stub 模式)"}');
     } catch (e) {
       debugPrint('[ConversationNotifier] 翻译引擎自动初始化失败: $e');
     }
+
+    // 3. ASR (whisper.cpp)
+    try {
+      final ready = await _asrService.tryAutoInitialize();
+      debugPrint('[ConversationNotifier] ASR 引擎自动初始化: ${ready ? "成功" : "未就绪 (模型未下载)"}');
+    } catch (e) {
+      debugPrint('[ConversationNotifier] ASR 引擎自动初始化失败: $e');
+    }
   }
 
   /// 翻译引擎是否真正就绪
   bool get isTranslationReady => _translationService.isEngineReady;
+
+  /// ASR 引擎是否就绪
+  bool get isAsrReady => _asrService.isInitialized;
 
   /// 手动初始化翻译引擎 (模型下载完成后调用)
   Future<void> initTranslationEngine(String modelDir) async {
@@ -114,6 +126,16 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       debugPrint('[ConversationNotifier] 翻译引擎手动初始化: ${_translationService.isEngineReady}');
     } catch (e) {
       debugPrint('[ConversationNotifier] 翻译引擎手动初始化失败: $e');
+    }
+  }
+
+  /// 手动初始化 ASR 引擎 (模型下载完成后调用)
+  Future<void> initAsrEngine(String modelPath) async {
+    try {
+      await _asrService.initialize(modelPath);
+      debugPrint('[ConversationNotifier] ASR 引擎手动初始化: ${_asrService.isInitialized}');
+    } catch (e) {
+      debugPrint('[ConversationNotifier] ASR 引擎手动初始化失败: $e');
     }
   }
 
@@ -126,14 +148,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   }
 
   /// 检测语种并确定翻译方向
-  ///
-  /// 策略:
-  ///   1. 精确匹配: 检测结果 == myLanguage 或 theirLanguage → 直接使用
-  ///   2. 语言族归属: 检测到非主页面语言时 (如法语/德语)，按语言族归类:
-  ///      - CJK 族 (中/日/韩) → 归为界面中属于 CJK 的那一侧
-  ///      - 欧洲族 (英/法/德/俄/西/意等) → 归为界面中属于欧洲的那一侧
-  ///      例: 界面是 中文↔英文，输入法语 → 法语∈欧洲族 → 归为英文侧 → 翻译为中文
-  ///      例: 界面是 中文↔英文，输入日语 → 日语∈CJK族 → 归为中文侧 → 翻译为英文
   ({String source, String target}) _detectDirection(String text) {
     final detectResult = _languageDetectService.detectLanguage(text);
     final rawLang = detectResult.languageCode;
@@ -152,21 +166,19 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     final theirFamily = LanguageCodes.getFamily(state.theirLanguage);
 
     if (detectedFamily == theirFamily && detectedFamily != myFamily) {
-      // 检测语言和"对方语言"同族 → 视为对方语言，翻译为我方语言
       debugPrint('[ConversationNotifier] 语言族归属: $rawLang → ${state.theirLanguage} 侧 (同族: $detectedFamily)');
       return (source: state.theirLanguage, target: state.myLanguage);
     }
     if (detectedFamily == myFamily && detectedFamily != theirFamily) {
-      // 检测语言和"我方语言"同族 → 视为我方语言，翻译为对方语言
       debugPrint('[ConversationNotifier] 语言族归属: $rawLang → ${state.myLanguage} 侧 (同族: $detectedFamily)');
       return (source: state.myLanguage, target: state.theirLanguage);
     }
 
-    // 两者同族或都不匹配: 默认为 myLanguage → theirLanguage
+    // 3. 默认
     return (source: state.myLanguage, target: state.theirLanguage);
   }
 
-  /// 实时语种检测 + 翻译（边输入边调用）
+  /// 实时语种检测 + 翻译
   Future<void> detectAndTranslate(String text) async {
     if (text.trim().isEmpty) {
       if (mounted) state = state.clearRealtime();
@@ -205,12 +217,10 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     }
   }
 
-  /// 清除实时翻译状态
   void clearRealtime() {
     if (mounted) state = state.clearRealtime();
   }
 
-  /// 完成输入 — 将当前实时翻译结果保存为消息
   void commitTranslation(String originalText) {
     if (originalText.trim().isEmpty) return;
     if (state.realtimeTranslation.isEmpty) return;
@@ -231,7 +241,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     );
   }
 
-  /// 发送文本消息（完整流程: 检测 → 翻译 → 保存）
   Future<void> sendTextMessage(String text) async {
     if (text.trim().isEmpty) return;
 
@@ -275,16 +284,22 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     state = state.copyWith(isProcessing: true);
 
     try {
+      // ASR: 语音 → 文本
       final asrResult = await _asrService.transcribe(audioPath);
       final String text = asrResult.text;
 
       if (text.trim().isEmpty) {
         state = state.copyWith(isProcessing: false);
+        debugPrint('[ConversationNotifier] ASR 返回空文本');
         return;
       }
 
+      debugPrint('[ConversationNotifier] ASR 识别结果: "$text" (lang: ${asrResult.detectedLanguage})');
+
+      // 检测翻译方向
       final dir = _detectDirection(text);
 
+      // 翻译
       final translated = await _translationService.translate(
         text,
         LanguageCodes.getNllbCode(dir.source),
