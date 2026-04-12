@@ -6,12 +6,14 @@ Real-time conversation translation app — offline translation powered by on-dev
 
 ## Features
 
-- **Offline Translation** — All AI inference runs locally on device, no internet required after model download
-- **Voice & Text Input** — Tap the mic to speak or type text directly
-- **Auto Language Detection** — Automatically detects input language via fastText and translates to the target
-- **Language Family Grouping** — Unrecognized languages are grouped by family (CJK / European) to determine translation direction
-- **9 Languages** — Chinese, English, Japanese, Korean, French, German, Russian, Spanish, Italian
-- **Translation History** — All translations saved and browsable in history view
+- **Fully Offline Translation** — All AI inference runs locally on device, no internet required after model download
+- **Streaming Voice Input** — 3-second segment-based ASR with real-time transcription via whisper.cpp
+- **Real-time Text Translation** — Type or speak, translation appears automatically with 400ms debounce
+- **Auto Language Detection** — fastText detects input language; direction locked on first detection per session
+- **Background Translation** — NLLB runs in a dedicated Dart Isolate, keeping UI smooth during inference
+- **Translation Deduplication** — Generation counter prevents stale/duplicate translation requests
+- **11 Languages** — Chinese, English, Japanese, Korean, French, German, Russian, Spanish, Italian, Thai, Vietnamese
+- **Swipeable History** — View and swipe-to-delete past translations
 - **Text-to-Speech** — Listen to pronunciation of both source and translated text
 - **Copy to Clipboard** — One-tap copy for original or translated text
 
@@ -19,215 +21,386 @@ Real-time conversation translation app — offline translation powered by on-dev
 
 | Component | Technology | Details |
 |---|---|---|
-| Framework | [Flutter](https://flutter.dev) 3.x | Cross-platform (iOS & Android) |
-| ASR | [whisper.cpp](https://github.com/ggerganov/whisper.cpp) | On-device speech recognition via dart:ffi (stub) |
-| Translation | [NLLB-200-distilled-600M](https://huggingface.co/Xenova/nllb-200-distilled-600M) | ONNX int8 quantized (~870MB), via [onnxruntime](https://pub.dev/packages/onnxruntime) Flutter plugin |
-| Language Detection | [fastText](https://fasttext.cc/) | lid.176.ftz model (~917KB, bundled in app) via dart:ffi |
+| Framework | [Flutter](https://flutter.dev) 3.41.6 | Cross-platform (iOS & Android) |
+| ASR | [whisper.cpp](https://github.com/ggerganov/whisper.cpp) 1.8.4 | On-device speech recognition via dart:ffi, 3s segment streaming |
+| Translation | [NLLB-200-distilled-600M](https://huggingface.co/Xenova/nllb-200-distilled-600M) | ONNX int8 quantized (~870MB), via background Isolate + onnxruntime |
+| Language Detection | [fastText](https://fasttext.cc/) lid.176.ftz | ~917KB bundled model, < 1ms inference via dart:ffi |
 | TTS | System TTS | flutter_tts, uses device built-in TTS engine |
 | State Management | [Riverpod](https://riverpod.dev/) | flutter_riverpod with StateNotifier |
-| Model Download | [HuggingFace](https://huggingface.co/) | On-demand model download via dio |
+| Model Download | [HuggingFace](https://huggingface.co/) | On-demand model download via dio with progress UI |
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Flutter App (Dart)                        │
-│                                                             │
-│  ┌──────────────┐  ┌──────────────────┐  ┌──────────────┐  │
-│  │ ConversationPage│  │ModelDownloadTrigger│  │  HistoryPage │  │
-│  └──────┬───────┘  └────────┬─────────┘  └──────────────┘  │
-│         │                   │                               │
-│  ┌──────▼───────────────────▼──────────────────────────┐    │
-│  │            ConversationProvider (Riverpod)           │    │
-│  │  _detectDirection() → language family grouping       │    │
-│  └──────┬──────────────┬──────────────┬────────────┘    │
-│         │              │              │                  │
-│  ┌──────▼──────┐ ┌─────▼──────┐ ┌────▼─────────────┐   │
-│  │LanguageDetect│ │Translation │ │  ASR Service     │   │
-│  │  Service     | │  Service   │ │  (whisper stub)  │   │
-│  │  (fastText)  │ │  (NLLB)    │ └──────────────────┘   │
-│  └──────┬──────┘ └─────┬──────┘                         │
-│         │              │                                │
-│  ┌──────▼──────┐ ┌─────▼──────────────┐                │
-│  │FastTextBindings│ │NllbOnnxTranslator │                │
-│  │  (dart:ffi) | │ (onnxruntime plugin)│                │
-│  └──────┬──────┘ └─────┬──────────────┘                │
-│         │              │                                │
-└─────────┼──────────────┼────────────────────────────────┘
-          │              │
-   ┌──────▼──────┐ ┌─────▼──────────────────────────────┐
-   │ libfasttext  │ │  ONNX Runtime (C++ via Flutter FFI) │
-   │ (C++ native) │ │  encoder_model_quantized.onnx       │
-   └─────────────┘ │  decoder_model_merged_quantized.onnx │
-                   │  tokenizer.json (BPE 256K vocab)     │
-                   └──────────────────────────────────────┘
++------------------------------------------------------------------+
+|                      Flutter App (Dart)                           |
+|                                                                   |
+|  +----------------+  +-------------------+  +-----------------+  |
+|  |ConversationPage|  |ModelDownloadTrigger|  |ConvModePage     |  |
+|  | (recording UI, |  | (auto-prompt)     |  | (swipe history) |  |
+|  |  pulse anim)   |  +---------+---------+  +-----------------+  |
+|  +-------+--------+            |                                  |
+|          |                     |                                  |
+|  +-------v---------------------v----------------------------+    |
+|  |         ConversationProvider (Riverpod)                   |    |
+|  |  - _translateGeneration (cancellation counter)            |    |
+|  |  - _lockedDirection (first-detection lock)                |    |
+|  |  - _lastTranslatingText (deduplication)                   |    |
+|  +-------+--------------+--------------+--------------------+    |
+|          |              |              |                          |
+|  +-------v------+ +----v---------+ +--v-----------------+       |
+|  |LanguageDetect | | Translation  | |  ASR Service       |       |
+|  |  Service      | |  Service     | |  (whisper.cpp)     |       |
+|  |  (fastText)   | |  |           | |  segment-based     |       |
+|  +--------------+  |  v           | +--------------------+       |
+|                    | Translation  |                               |
+|                    |  Isolate (bg)|                               |
+|                    +------+-------+                               |
+|                           |                                       |
+|                    +------v--------------+                        |
+|                    | NllbOnnxTranslator   |                        |
+|                    | (ONNX Runtime)       |                        |
+|                    +---------------------+                        |
++-------------------------------------------------------------------+
 ```
 
 ## Supported Languages
 
-🇨🇳 中文 · 🇺🇸 English · 🇯🇵 日本語 · 🇰🇷 한국어 · 🇫🇷 Français · 🇩🇪 Deutsch · 🇷🇺 Русский · 🇪���� Español · 🇮���� Italiano
+| Flag | Language | NLLB Code | Whisper Code |
+|---|---|---|---|
+| :cn: | Chinese | zho_Hans | zh |
+| :us: | English | eng_Latn | en |
+| :jp: | Japanese | jpn_Jpan | ja |
+| :kr: | Korean | kor_Hang | ko |
+| :fr: | French | fra_Latn | fr |
+| :de: | German | deu_Latn | de |
+| :ru: | Russian | rus_Cyrl | ru |
+| :es: | Spanish | spa_Latn | es |
+| :it: | Italian | ita_Latn | it |
+| :thailand: | Thai | tha_Thai | th |
+| :vietnam: | Vietnamese | vie_Latn | vi |
 
 ## Requirements
 
-- Flutter SDK >= 3.5.0
-- Dart SDK >= 3.2.0
-- **iOS**: Xcode 15+, iOS 15.0+
-- **Android**: minSdkVersion 24, NDK installed
+- Flutter SDK >= 3.5.0, Dart SDK >= 3.2.0
 - CMake >= 3.18 (for native library compilation)
+- **iOS**: Xcode 15+, iOS 15.0+, CocoaPods
+- **Android**: Android Studio, minSdkVersion 24 (Android 7.0+), NDK, CMake via SDK Manager
 
 ## Getting Started
 
 ### 1. Clone & Install Dependencies
 
 ```bash
-git clone https://github.com/user/AITranslator.git
+git clone https://github.com/simondrow/aiTranslator.git
 cd AITranslator
 flutter pub get
 ```
 
-### 2. Download NLLB Translation Model
+### 2. Download AI Models
 
-The NLLB ONNX model files (~870MB) are **not** included in the git repository. Download them before first use:
+Models are **not** included in the repository (~1GB total). Download before first use:
 
 ```bash
+# NLLB translation model (~870MB)
 bash scripts/download_nllb_model.sh
+
+# Whisper ASR model (~148MB, base model)
+bash scripts/download_whisper_model.sh
 ```
 
-This downloads from HuggingFace to `assets/models/nllb-onnx/`:
+> **HuggingFace Mirror**: If HuggingFace is inaccessible in your region, replace `https://huggingface.co` with `https://hf-mirror.com` in the download scripts.
 
-| File | Size | Source |
-|---|---|---|
-| `encoder_model_quantized.onnx` | 400 MB | Xenova/nllb-200-distilled-600M |
-| `decoder_model_merged_quantized.onnx` | 453 MB | Xenova/nllb-200-distilled-600M |
-| `tokenizer.json` | 17 MB | Xenova/nllb-200-distilled-600M p
-�223 3. Run the App
+Alternatively, skip this step — the app will prompt model download on first use (requires internet).
+
+| Model | File | Size | Source |
+|---|---|---|---|
+| NLLB Encoder | `encoder_model_quantized.onnx` | 419 MB | Xenova/nllb-200-distilled-600M |
+| NLLB Decoder | `decoder_model_merged_quantized.onnx` | 476 MB | Xenova/nllb-200-distilled-600M |
+| NLLB Tokenizer | `tokenizer.json` | 17 MB | Xenova/nllb-200-distilled-600M |
+| Whisper Base | `ggml-base.bin` | 148 MB | ggerganov/whisper.cpp |
+| fastText LID | `lid.176.ftz` | 917 KB | Bundled in assets |
+
+---
+
+## iOS Simulator Testing
+
+### Quick Start
 
 ```bash
-# iOS Simulator
+# 1. Install dependencies
+flutter pub get
+cd ios && pod install && cd ..
+
+# 2. Run on iOS Simulator
 flutter run
-
-# Android device
-flutter run -d <device_id>
 ```
 
-### 4. Push Models to Simulator (Debug)
+### Push Models to Simulator (Skip In-App Download)
 
-After installing the app on the iOS Simulator, push the downloaded models directly into the app's Documents folder — this avoids the in-app download:
+For faster development iteration, push pre-downloaded models directly into the Simulator's app container:
 
 ```bash
+# Download models first (one-time)
+bash scripts/download_nllb_model.sh
+bash scripts/download_whisper_model.sh
+
+# Install app on simulator
+flutter run --no-pub
+
+# Push models to simulator's Documents directory
 bash scripts/push_models_to_sim.sh
+
+# Hot restart (press R) - models will be detected immediately
 ```
 
-Then hot restart (`R`) the app. The translation engine will auto-detect the models and initialize immediately.
-
-> **Note**: If you skip this step, the app will prompt you to download the models on first user interaction (first text input, mic tap, or language switch).
-
-### Full Debug Workflow
+### iOS Development Workflow
 
 ```bash
 # One-time setup
-bash scripts/download_nllb_model.sh      # Download models to project dir
-flutter run --no-pub                      # Install app (~15MB)
-bash scripts/push_models_to_sim.sh        # Push models to simulator
+bash scripts/download_nllb_model.sh        # Download NLLB (~870MB)
+bash scripts/download_whisper_model.sh      # Download Whisper (~148MB)
+flutter pub get && cd ios && pod install && cd ..
+flutter run --no-pub                        # Install app (~15MB)
+bash scripts/push_models_to_sim.sh          # Push models to simulator
 
-# Daily development
-flutter run --no-pub                      # Fast install, models already in sim
-# Press R for hot restart
+# Daily iteration
+flutter run --no-pub                        # Fast rebuild, models persist in sim
+# Press R for hot restart, r for hot reload
 ```
+
+### iOS Notes
+
+- Native libraries (whisper.cpp, fastText) are built via CocoaPods using the `native/` CMakeLists
+- The fastText model (`lid.176.ftz`, 917KB) is bundled in `assets/models/` and auto-copied to Documents on first launch
+- NLLB and Whisper models are stored in `Documents/models/` and persist across app reinstalls on Simulator
+
+---
+
+## Android Real Device Testing
+
+### Prerequisites
+
+1. **Android Studio** installed with:
+   - Android SDK (API 24+)
+   - NDK (via SDK Manager -> SDK Tools -> NDK)
+   - CMake (via SDK Manager -> SDK Tools -> CMake)
+
+2. **Device Setup**:
+   - Enable **Developer Options** (tap Build Number 7 times in Settings -> About Phone)
+   - Enable **USB Debugging** in Developer Options
+   - Connect phone via USB, accept the debugging prompt on device
+
+### Quick Start
+
+```bash
+# 1. Verify device is connected
+flutter devices
+
+# 2. Clean build (recommended for first Android build)
+flutter clean
+flutter pub get
+
+# 3. Run on Android device
+flutter run -d <device_id>
+```
+
+> **First build takes 5-10 minutes** — CMake compiles whisper.cpp and fastText native libraries for Android ABIs (arm64-v8a, armeabi-v7a, x86_64).
+
+### Model Loading on Android
+
+There are two options for getting models onto the device:
+
+#### Option A: In-App Download (Recommended)
+
+Simply launch the app. On first interaction (text input, mic tap, or language switch), the app will prompt to download models from HuggingFace. Progress is shown in-app.
+
+> **Note**: Requires ~1GB of free storage and a network connection. If HuggingFace is inaccessible, see the mirror note above.
+
+#### Option B: ADB Push (Faster for Development)
+
+Push pre-downloaded models directly to the device:
+
+```bash
+# Download models to project dir (if not already done)
+bash scripts/download_nllb_model.sh
+bash scripts/download_whisper_model.sh
+
+# Create target directories on device
+adb shell run-as com.ai.translator mkdir -p /data/data/com.ai.translator/app_flutter/models/nllb-onnx
+adb shell run-as com.ai.translator mkdir -p /data/data/com.ai.translator/app_flutter/models/whisper
+
+# Push NLLB models (via /data/local/tmp as intermediate)
+adb push assets/models/nllb-onnx/encoder_model_quantized.onnx /data/local/tmp/encoder.onnx
+adb shell run-as com.ai.translator cp /data/local/tmp/encoder.onnx /data/data/com.ai.translator/app_flutter/models/nllb-onnx/encoder_model_quantized.onnx
+
+adb push assets/models/nllb-onnx/decoder_model_merged_quantized.onnx /data/local/tmp/decoder.onnx
+adb shell run-as com.ai.translator cp /data/local/tmp/decoder.onnx /data/data/com.ai.translator/app_flutter/models/nllb-onnx/decoder_model_merged_quantized.onnx
+
+adb push assets/models/nllb-onnx/tokenizer.json /data/local/tmp/tokenizer.json
+adb shell run-as com.ai.translator cp /data/local/tmp/tokenizer.json /data/data/com.ai.translator/app_flutter/models/nllb-onnx/tokenizer.json
+
+# Push Whisper model
+adb push assets/models/whisper/ggml-base.bin /data/local/tmp/whisper.bin
+adb shell run-as com.ai.translator cp /data/local/tmp/whisper.bin /data/data/com.ai.translator/app_flutter/models/whisper/ggml-base.bin
+
+# Clean up tmp files
+adb shell rm /data/local/tmp/encoder.onnx /data/local/tmp/decoder.onnx /data/local/tmp/tokenizer.json /data/local/tmp/whisper.bin
+```
+
+Then hot restart the app (`R`).
+
+### Android Permissions
+
+The following permissions are configured in `AndroidManifest.xml`:
+
+| Permission | Purpose |
+|---|---|
+| `INTERNET` | Download models from HuggingFace |
+| `RECORD_AUDIO` | Microphone access for voice input |
+| `READ_EXTERNAL_STORAGE` | File access (Android 9 and below) |
+| `WRITE_EXTERNAL_STORAGE` | File access (Android 9 and below) |
+| `FOREGROUND_SERVICE` | Background recording support |
+
+> The app also sets `requestLegacyExternalStorage="true"` for Android 10 compatibility and `usesCleartextTraffic="true"` for HTTP mirror support.
+
+### Android Troubleshooting
+
+| Problem | Solution |
+|---|---|
+| `flutter devices` shows no device | Check USB cable, enable USB Debugging, accept prompt on phone |
+| Gradle build fails | Run `cd android && ./gradlew clean && cd ..` then retry |
+| CMake not found | Android Studio -> SDK Manager -> SDK Tools -> install CMake |
+| NDK not found | Android Studio -> SDK Manager -> SDK Tools -> install NDK |
+| `minSdkVersion` error | Already set to 24 in `android/app/build.gradle` |
+| Model download fails | Check network; try HuggingFace mirror (`hf-mirror.com`) |
+| App crashes on model load | Check logcat: `adb logcat -s flutter` for path/permission errors |
+| Recording permission denied | Ensure `RECORD_AUDIO` permission is granted in system settings |
+
+### Android Development Workflow
+
+```bash
+# One-time setup
+flutter clean && flutter pub get
+flutter run -d <device_id>           # First build: 5-10 min (CMake)
+# App prompts model download on first use
+
+# Daily iteration
+flutter run -d <device_id>           # Incremental build: ~30s
+# Press R for hot restart, r for hot reload
+# Models persist in app data across rebuilds
+```
+
+---
 
 ## AI Models
 
-| Model | Size | Bundled | Purpose | Status |
+| Model | Size | Bundled | Purpose | Runtime |
 |---|---|---|---|---|
-| fastText lid.176.ftz | 917 KB | ✅ Yes | Language detection | Native FFI inference |
-| NLLB-200 ONNX (int8) | 870 MB | ❌ On-demand | Machine translation | ONNX Runtime Dart |
-| Whisper Small | 466 MB | ❌ On-demand | Speech recognition | Stub (not yet integrated) |
+| fastText lid.176.ftz | 917 KB | Yes | Language detection | dart:ffi, < 1ms |
+| NLLB-200 ONNX (int8) | 870 MB | Download | Machine translation | Background Isolate, 3-70s |
+| Whisper Base (GGML) | 148 MB | Download | Speech recognition | dart:ffi, ~3s per segment |
 
 ## Project Structure
 
 ```
 AITranslator/
-├── lib/
-│   ├── main.dart                          # App entry point
-│   ├── app/
-│   │   ├── theme.dart                     # Theme & color definitions
-│   │   └── router.dart                    # Route configuration
-│   ├── features/
-│   │   ├── conversation/                  # Translation feature
-│   │   │   ├── models/message.dart        # Message model
-│   │   │   ├── providers/                 # Riverpod state management
-│   │   │   ├── pages/
-│   │   │   │   ├── conversation_page.dart # Main translation page
-│   │   │   │   └── conversation_mode_page.dart # History page
-│   │   │   └── widgets/
-│   │   │       ├── language_bar.dart      # Language selector bar
-│   │   │       └── language_selector.dart # Language picker sheet
-│   │   └── model_manager/                # Model download management
-│   │       ├── models/model_info.dart
-│   │       ├── providers/
-│   │       └── pages/
-│   ├── services/
-│   │   ├── nllb_onnx_translator.dart      # NLLB ONNX inference (encoder-decoder)
-│   │   ├── translation_service.dart       # Translation service wrapper
-│   │   ├── model_download_trigger.dart    # On-demand download dialog
-│   │   ├── language_detect_service.dart   # Language detection (fastText FFI)
-│   │   ├── asr_service.dart               # Speech recognition (stub)
-│   │   ├── audio_service.dart             # Audio recording
-│   │   └── tts_service.dart               # Text-to-speech
-│   ├── native/                            # dart:ffi bindings
-│   │   ├── fasttext_bindings.dart
-│   │   ├── nllb_bindings.dart             # Legacy FFI bindings (unused)
-│   │   └── whisper_bindings.dart
-│   └── utils/
-│       └── language_codes.dart            # Language codes + family grouping
-├── native/                                # C/C++ bridge code
-│   ├── CMakeLists.txt
-│   ├── AiNllb.podspec
-│   ├── bridge/
-│   │   ├── whisper_bridge.{h,c}
-│   │   ├── nllb_bridge.{h,cpp}
-│   │   └── fasttext_bridge.{h,cpp}
-│   └── third_party/
-│       └── fastText/                      # Facebook fastText source (v0.9.2)
-├── scripts/
-│   ├── download_nllb_model.sh             # Download NLLB ONNX models
-│   └── push_models_to_sim.sh              # Push models to iOS Simulator
-├── assets/models/
-│   ├── lid.176.ftz                        # fastText model (bundled, 917KB)
-│   └── nllb-onnx/                         # NLLB ONNX models (gitignored)
-│       ├── encoder_model_quantized.onnx
-│       ├── decoder_model_merged_quantized.onnx
-│       └── tokenizer.json
-├── ios/
-├── android/
-└── pubspec.yaml
++-- lib/
+|   +-- main.dart                          # App entry point
+|   +-- app/
+|   |   +-- theme.dart                     # Theme & color definitions
+|   |   +-- router.dart                    # Route configuration
+|   +-- features/
+|   |   +-- conversation/                  # Core translation feature
+|   |   |   +-- models/message.dart        # Message model
+|   |   |   +-- providers/                 # Riverpod state management
+|   |   |   |   +-- conversation_provider.dart  # Translation logic, cancellation
+|   |   |   +-- pages/
+|   |   |   |   +-- conversation_page.dart      # Main page (recording UI, pulse anim)
+|   |   |   |   +-- conversation_mode_page.dart # History (swipe-to-delete)
+|   |   |   +-- widgets/
+|   |   |       +-- language_bar.dart      # Language selector bar
+|   |   |       +-- language_selector.dart # Language picker sheet
+|   |   +-- model_manager/                # Model download management
+|   |       +-- models/model_info.dart
+|   |       +-- providers/
+|   |       +-- pages/
+|   +-- services/
+|   |   +-- nllb_onnx_translator.dart      # NLLB ONNX encoder-decoder inference
+|   |   +-- translation_isolate.dart       # Background Isolate for NLLB
+|   |   +-- translation_service.dart       # Translation service wrapper
+|   |   +-- model_download_trigger.dart    # On-demand download dialog
+|   |   +-- language_detect_service.dart   # Language detection (fastText FFI)
+|   |   +-- asr_service.dart               # Whisper ASR (segment-based streaming)
+|   |   +-- audio_service.dart             # Audio recording + rotateRecording()
+|   |   +-- tts_service.dart               # Text-to-speech
+|   +-- native/                            # dart:ffi bindings
+|   |   +-- fasttext_bindings.dart
+|   |   +-- nllb_bindings.dart
+|   |   +-- whisper_bindings.dart
+|   +-- utils/
+|       +-- language_codes.dart            # 11 languages + family grouping
++-- native/                                # C/C++ bridge code
+|   +-- CMakeLists.txt                     # Top-level CMake (whisper + fastText + nllb)
+|   +-- bridge/
+|   |   +-- whisper_bridge.{h,c}
+|   |   +-- nllb_bridge.{h,cpp}
+|   |   +-- fasttext_bridge.{h,cpp}
+|   +-- third_party/
+|       +-- whisper.cpp/                   # whisper.cpp v1.8.4
+|       +-- fastText/                      # Facebook fastText v0.9.2
++-- scripts/
+|   +-- download_nllb_model.sh             # Download NLLB ONNX models
+|   +-- download_whisper_model.sh          # Download Whisper GGML model
+|   +-- push_models_to_sim.sh             # Push models to iOS Simulator
++-- assets/models/
+|   +-- lid.176.ftz                        # fastText model (bundled, 917KB)
+|   +-- nllb-onnx/                         # NLLB ONNX models (gitignored)
+|   +-- whisper/                           # Whisper GGML model (gitignored)
++-- ios/
++-- android/
+|   +-- app/src/main/AndroidManifest.xml   # Permissions: INTERNET, RECORD_AUDIO, etc.
++-- pubspec.yaml
 ```
 
 ## Usage
 
-1. **Text input**: Type in the text field — translation appears in real-time after 400ms debounce
-2. **Complete input**: Press Done or tap outside the text field to enter the bilingual display with TTS
-3. **Voice input**: Tap the mic button to record, tap anywhere to stop
-4. **Language selection**: Tap the language pills at the bottom to change source/target languages
-5. **History**: Tap the history icon (top-left) to view all past translations
-6. **TTS**: After translation, tap the speaker icon to hear pronunciation
-7. **Copy**: Tap the copy icon to copy text to clipboard
+1. **Text input**: Type in the text field - translation appears in real-time after 400ms debounce
+2. **Voice input**: Long-press the mic button to record (pulse animation), release or tap to stop
+3. **Streaming ASR**: During recording, speech is transcribed in 3-second segments in real-time
+4. **Auto-translate**: Language is auto-detected on first input; direction is locked for the session
+5. **Complete input**: Press Done to commit the bilingual message with TTS controls
+6. **Language switch**: Tap language pills at the bottom; switching clears current translation state
+7. **History**: Tap the history icon to view past translations; swipe left to delete
+8. **TTS**: Tap the speaker icon to hear pronunciation
+9. **Copy**: Tap the copy icon to copy text to clipboard
+
+## Known Limitations
+
+- **NLLB translation speed**: Without KV cache, long text takes 10-70s. Short text (~10 tokens) takes ~3-10s.
+- **NLLB short-text hallucination**: The distilled-600M model occasionally produces profanity on very short inputs (known model issue).
+- **No KV cache yet**: Decoder recomputes all attention from scratch each step (O(N^2)). KV cache optimization would provide 3-6x speedup.
 
 ## Roadmap
 
-- [x] Integrate fastText native library (language detection via dart:ffi)
-- [x] Integrate NLLB-200 ONNX translation (encoder-decoder, int8 quantized)
+- [x] fastText native language detection (dart:ffi)
+- [x] NLLB-200 ONNX translation (encoder-decoder, int8 quantized)
 - [x] On-demand model download with progress dialog
-- [x] Language family grouping (CJK / European)
-- [x] Input blur auto-commit (bilingual display + TTS)
-- [ ] Enable KV Cache for decoder (3-5x speedup)
-- [ ] Integrate whisper.cpp native library (replace ASR stub)
+- [x] Streaming segment-based ASR via whisper.cpp
+- [x] Background Isolate for NLLB (UI non-blocking)
+- [x] Translation request deduplication & cancellation
+- [x] Language detection direction locking
+- [x] 11 language support (zh/en/ja/ko/fr/de/ru/es/it/th/vi)
+- [x] Swipeable translation history
+- [x] iOS Simulator testing complete
+- [x] Android permissions & manifest configuration
 - [ ] Android real device testing
+- [ ] KV Cache for NLLB decoder (3-6x speedup)
 - [ ] Explore smaller models (Opus-MT ~150MB/pair)
 - [ ] Dark mode support
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT License - see [LICENSE](LICENSE) for details.
 
 > **Note**: The NLLB-200 model is licensed under CC-BY-NC 4.0 (non-commercial use only).
