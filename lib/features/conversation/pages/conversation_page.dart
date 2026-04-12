@@ -133,8 +133,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     if (text.isEmpty) {
       _debounceTimer?.cancel();
       ref.read(conversationProvider.notifier).cancelAndClear();
-      if (_isCompleted) setState(() => _isCompleted = false);
-      setState(() {});
+      setState(() => _isCompleted = false);
       return;
     }
 
@@ -166,18 +165,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     setState(() => _isCompleted = true);
   }
 
-  void _clearAll() {
-    _debounceTimer?.cancel();
-    ref.read(conversationProvider.notifier).cancelAndClear();
-    _previousText = '';
-    setState(() {
-      _textController.clear();
-      _isCompleted = false;
-      _streamingAsrText = '';
-    });
-  }
-
-  /// 完全重置回初始状态（X 按钮）
+  /// 完全重置回初始状态（X 按钮 / 清空）
   /// 取消所有后台 ASR/翻译任务，清空输入和结果，收起键盘
   void _resetToInitial() {
     debugPrint('[ConversationPage] 重置到初始状态');
@@ -444,6 +432,13 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
   // Navigation & TTS
   // ============================================================
 
+  void _copyToClipboard(String text, String message) {
+    Clipboard.setData(ClipboardData(text: text));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 1)),
+    );
+  }
+
   void _openHistory() {
     Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => const HistoryPage()),
@@ -575,16 +570,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
               const Spacer(),
               _ActionBtn(
                 icon: Icons.copy_outlined,
-                onTap: () {
-                  Clipboard.setData(
-                      ClipboardData(text: _textController.text));
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('已复制原文'),
-                      duration: Duration(seconds: 1),
-                    ),
-                  );
-                },
+                onTap: () => _copyToClipboard(_textController.text, '已复制原文'),
               ),
             ],
           ),
@@ -710,16 +696,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
             const Spacer(),
             _ActionBtn(
               icon: Icons.copy_outlined,
-              onTap: () {
-                Clipboard.setData(
-                    ClipboardData(text: state.realtimeTranslation));
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('已复制翻译结果'),
-                    duration: Duration(seconds: 1),
-                  ),
-                );
-              },
+              onTap: () => _copyToClipboard(state.realtimeTranslation, '已复制翻译结果'),
             ),
           ],
         ),
