@@ -87,6 +87,7 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
             )
           : ListView.builder(
               controller: _scrollController,
+              physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               itemCount: messages.length,
               itemBuilder: (context, index) {
