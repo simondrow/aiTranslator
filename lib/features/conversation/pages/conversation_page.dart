@@ -275,15 +275,28 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
           .replaceAll(RegExp(r'\[BLANK_AUDIO\]', caseSensitive: false), '')
           .trim();
       if (finalText.isNotEmpty) {
-        // 提交翻译并进入完成态
         final notifier = ref.read(conversationProvider.notifier);
-        await notifier.sendTextMessage(finalText);
-        final state = ref.read(conversationProvider);
-        if (state.messages.isNotEmpty) {
+        final currentState = ref.read(conversationProvider);
+
+        if (currentState.realtimeTranslation.isNotEmpty) {
+          // 已有实时翻译结果，直接 commit，不重新翻译
+          debugPrint('[ConversationPage] 语音结束: 复用已有翻译结果');
+          notifier.commitTranslation(finalText);
           setState(() {
-            _textController.text = state.messages.last.originalText;
+            _textController.text = finalText;
             _isCompleted = true;
           });
+        } else {
+          // 没有翻译结果（可能 debounce 还没触发），做一次翻译
+          debugPrint('[ConversationPage] 语音结束: 无已有翻译，执行最终翻译');
+          await notifier.sendTextMessage(finalText);
+          final newState = ref.read(conversationProvider);
+          if (newState.messages.isNotEmpty) {
+            setState(() {
+              _textController.text = newState.messages.last.originalText;
+              _isCompleted = true;
+            });
+          }
         }
       } else {
         debugPrint('[ConversationPage] 录音结束但无识别结果');
@@ -330,18 +343,17 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
             (_streamingAsrText.isEmpty ? '' : ' ') + cleanResult;
 
         if (mounted) {
+          // 先更新 _previousText 再设 controller，
+          // 让 _onTextChanged 感知到内容变化并走 debounce 翻译，不会重复
+          final newText = _streamingAsrText;
+          _previousText = ''; // 强制 _onTextChanged 识别为内容变化
           setState(() {
-            _textController.text = _streamingAsrText;
-            // 光标移到末尾
+            _textController.text = newText;
             _textController.selection = TextSelection.fromPosition(
               TextPosition(offset: _textController.text.length),
             );
           });
-
-          // 触发实时翻译（类似文字输入的防抖效果）
-          if (!isFinal && _streamingAsrText.trim().isNotEmpty) {
-            notifier.detectAndTranslate(_streamingAsrText.trim());
-          }
+          // 翻译完全由 _onTextChanged 的 debounce 统一触发，不再手动调用
         }
       }
     } catch (e) {

@@ -77,6 +77,9 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   /// 翻译请求版本号——每次新请求 +1，旧请求完成时对比，过期则丢弃
   int _translateGeneration = 0;
 
+  /// 上一次提交翻译的原文（用于去重，避免相同文本重复翻译）
+  String _lastTranslatingText = '';
+
   /// 已锁定的翻译方向（源 → 目标）
   ({String source, String target})? _lockedDirection;
 
@@ -192,8 +195,15 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       return;
     }
 
+    // 去重：文本与上次完全相同且已有翻译结果，跳过
+    if (text == _lastTranslatingText && state.realtimeTranslation.isNotEmpty) {
+      debugPrint('[ConversationNotifier] detectAndTranslate 跳过 (文本未变化)');
+      return;
+    }
+
     // 递增版本号，标记新请求
     final gen = ++_translateGeneration;
+    _lastTranslatingText = text;
     debugPrint('[ConversationNotifier] ▶ detectAndTranslate 开始 (gen=$gen) text="${text.length > 30 ? text.substring(0, 30) + "..." : text}"');
 
     if (mounted) state = state.copyWith(isDetecting: true);
@@ -261,6 +271,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   void cancelAndClear() {
     _translateGeneration++;
     _lockedDirection = null;
+    _lastTranslatingText = '';
     if (mounted) state = state.clearRealtime();
   }
 
