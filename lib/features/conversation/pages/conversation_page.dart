@@ -22,7 +22,8 @@ class ConversationPage extends ConsumerStatefulWidget {
   ConsumerState<ConversationPage> createState() => _ConversationPageState();
 }
 
-class _ConversationPageState extends ConsumerState<ConversationPage> {
+class _ConversationPageState extends ConsumerState<ConversationPage>
+    with SingleTickerProviderStateMixin {
   final TextEditingController _textController = TextEditingController();
   final FocusNode _textFocusNode = FocusNode();
   final AudioService _audioService = AudioService();
@@ -30,9 +31,19 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
 
   bool _isRecording = false;
   bool _isCompleted = false;
-  bool _firstInteraction = true; // 首次交互触发下载
+  bool _firstInteraction = true;
 
-  /// 防抖定时器 — 用户停顿后触发检测+翻译
+  /// 流式 ASR 状态
+  Timer? _segmentTimer;
+  String _streamingAsrText = '';
+  bool _isTranscribing = false;
+  static const _segmentInterval = Duration(seconds: 3);
+
+  /// 录音按钮动画
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnimation;
+
+  /// 防抖定时器
   Timer? _debounceTimer;
   static const _debounceDuration = Duration(milliseconds: 400);
 
@@ -44,11 +55,18 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
     _textFocusNode.addListener(_onFocusChanged);
     // 启动后自动下载 whisper 模型（如尚未下载）
     Future.microtask(() => _ensureWhisperDownloaded());
+
+    // 录音脉冲动画
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    );
+    _pulseAnimation = Tween<double>(begin: 1.0, end: 1.15).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
   }
 
-  /// 检查并自动下载 whisper 模型
   Future<void> _ensureWhisperDownloaded() async {
-    // 等待 modelManager 初始化完成
     await Future.delayed(const Duration(seconds: 1));
     if (!mounted) return;
     final modelState = ref.read(modelManagerProvider);
@@ -61,6 +79,8 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
   @override
   void dispose() {
     _debounceTimer?.cancel();
+    _segmentTimer?.cancel();
+    _pulseController.dispose();
     _textController.removeListener(_onTextChanged);
     _textFocusNode.removeListener(_onFocusChanged);
     _textController.dispose();
@@ -70,67 +90,57 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
     super.dispose();
   }
 
-  /// 首次用户交互时触发模型下载检查
-  /// 触发条件: 首次输入文字、点击麦克风、切换语言
+  // ============================================================
+  // Model download
+  // ============================================================
+
   Future<bool> _ensureModelReady() async {
     if (!_firstInteraction) return true;
     _firstInteraction = false;
 
     final notifier = ref.read(conversationProvider.notifier);
-
-    // 如果翻译引擎已就绪，无需下载
     if (notifier.isTranslationReady) return true;
 
-    // 弹出下载对话框
     final ready = await ModelDownloadTrigger.ensureNllbReady(context, ref);
 
     if (ready) {
-      // 下载完成，初始化翻译引擎
-      final modelDir = await ref.read(modelManagerProvider.notifier).getNllbModelDir();
+      final modelDir =
+          await ref.read(modelManagerProvider.notifier).getNllbModelDir();
       await notifier.initTranslationEngine(modelDir);
     } else {
-      // 用户取消下载，允许再次触发
       _firstInteraction = true;
     }
-
     return ready;
   }
 
-  /// 文字输入回调 — 带防抖的实时检测+翻译
+  // ============================================================
+  // Text input
+  // ============================================================
+
   void _onTextChanged() {
     final text = _textController.text;
 
-    // 清空输入 → 重置所有状态
     if (text.isEmpty) {
       _debounceTimer?.cancel();
       ref.read(conversationProvider.notifier).clearRealtime();
-      if (_isCompleted) {
-        setState(() => _isCompleted = false);
-      }
+      if (_isCompleted) setState(() => _isCompleted = false);
       setState(() {});
       return;
     }
 
-    // 已完成态下继续编辑 → 退回到输入态
-    if (_isCompleted) {
-      setState(() => _isCompleted = false);
-    }
+    if (_isCompleted) setState(() => _isCompleted = false);
 
-    // 防抖: 用户停止输入 400ms 后触发检测+翻译
     _debounceTimer?.cancel();
     _debounceTimer = Timer(_debounceDuration, () async {
       final currentText = _textController.text.trim();
       if (currentText.isNotEmpty) {
-        // 首次输入触发模型下载
         await _ensureModelReady();
         ref.read(conversationProvider.notifier).detectAndTranslate(currentText);
       }
     });
-
     setState(() {});
   }
 
-  /// 用户按下回车/Done — 标记为完成态
   Future<void> _onSubmitted(String _) async {
     final text = _textController.text.trim();
     if (text.isEmpty) return;
@@ -141,12 +151,10 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
     final notifier = ref.read(conversationProvider.notifier);
     final state = ref.read(conversationProvider);
 
-    // 如果实时翻译已有结果，直接提交; 否则等待完整流程
     if (state.realtimeTranslation.isNotEmpty) {
       notifier.commitTranslation(text);
       setState(() => _isCompleted = true);
     } else {
-      // 尚未拿到翻译结果，走完整流程
       await notifier.sendTextMessage(text);
       setState(() => _isCompleted = true);
     }
@@ -158,55 +166,171 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
     setState(() {
       _textController.clear();
       _isCompleted = false;
+      _streamingAsrText = '';
     });
   }
 
-  Future<void> _toggleVoiceRecording() async {
-    // 首次点击麦克风触发模型下载
+  void _onFocusChanged() {
+    if (_textFocusNode.hasFocus) return;
+
+    final text = _textController.text.trim();
+    if (text.isEmpty) return;
+    if (_isCompleted) return;
+
+    _debounceTimer?.cancel();
+
+    final state = ref.read(conversationProvider);
+    final notifier = ref.read(conversationProvider.notifier);
+
+    if (state.realtimeTranslation.isNotEmpty) {
+      notifier.commitTranslation(text);
+      setState(() => _isCompleted = true);
+    } else if (!state.isTranslating && !state.isDetecting) {
+      notifier.sendTextMessage(text).then((_) {
+        if (mounted) setState(() => _isCompleted = true);
+      });
+    }
+  }
+
+  // ============================================================
+  // Streaming voice recording
+  // ============================================================
+
+  Future<void> _startVoiceRecording() async {
     await _ensureModelReady();
 
-    // 确保 whisper 模型已下载，后台触发下载
+    // 确保 whisper 模型后台下载
     final modelState = ref.read(modelManagerProvider);
     if (!modelState.isWhisperReady && !modelState.isDownloading) {
-      debugPrint('[ConversationPage] whisper 模型未就绪，触发后台下载...');
       ref.read(modelManagerProvider.notifier).downloadWhisperIfNeeded();
     }
 
-    if (_isRecording) {
-      setState(() => _isRecording = false);
-      try {
-        final path = await _audioService.stopRecording();
-        if (path.isNotEmpty) {
-          final notifier = ref.read(conversationProvider.notifier);
-          await notifier.sendVoiceMessage(path);
-          final state = ref.read(conversationProvider);
-          if (state.messages.isNotEmpty) {
-            final lastMsg = state.messages.last;
-            setState(() {
-              _textController.text = lastMsg.originalText;
-              _isCompleted = true;
-            });
-          }
-        }
-      } catch (e) {
-        debugPrint('Stop recording failed: $e');
-      }
-    } else {
-      try {
-        _textFocusNode.unfocus();
-        await _audioService.startRecording();
-        _debounceTimer?.cancel();
-        ref.read(conversationProvider.notifier).clearRealtime();
-        setState(() {
-          _isRecording = true;
-          _textController.clear();
-          _isCompleted = false;
-        });
-      } catch (e) {
-        debugPrint('Start recording failed: $e');
-      }
+    try {
+      _textFocusNode.unfocus();
+      await _audioService.startRecording();
+
+      _debounceTimer?.cancel();
+      ref.read(conversationProvider.notifier).clearRealtime();
+
+      setState(() {
+        _isRecording = true;
+        _isCompleted = false;
+        _streamingAsrText = '';
+        _textController.text = '';
+      });
+
+      // 启动脉冲动画
+      _pulseController.repeat(reverse: true);
+
+      // 启动分段定时器
+      _segmentTimer?.cancel();
+      _segmentTimer = Timer.periodic(_segmentInterval, (_) {
+        _processSegment();
+      });
+    } catch (e) {
+      debugPrint('[ConversationPage] Start recording failed: $e');
     }
   }
+
+  Future<void> _stopVoiceRecording() async {
+    if (!_isRecording) return;
+
+    // 停止定时器和动画
+    _segmentTimer?.cancel();
+    _segmentTimer = null;
+    _pulseController.stop();
+    _pulseController.reset();
+
+    setState(() => _isRecording = false);
+
+    try {
+      // 停止录音并处理最后一段
+      final path = await _audioService.stopRecording();
+      if (path.isNotEmpty) {
+        await _transcribeSegment(path, isFinal: true);
+      }
+
+      // 最终文本
+      final finalText = _streamingAsrText.trim();
+      if (finalText.isNotEmpty) {
+        // 提交翻译并进入完成态
+        final notifier = ref.read(conversationProvider.notifier);
+        await notifier.sendTextMessage(finalText);
+        final state = ref.read(conversationProvider);
+        if (state.messages.isNotEmpty) {
+          setState(() {
+            _textController.text = state.messages.last.originalText;
+            _isCompleted = true;
+          });
+        }
+      } else {
+        debugPrint('[ConversationPage] 录音结束但无识别结果');
+      }
+    } catch (e) {
+      debugPrint('[ConversationPage] Stop recording failed: $e');
+    }
+  }
+
+  /// 处理一个录音分段
+  Future<void> _processSegment() async {
+    if (!_isRecording || _isTranscribing) return;
+
+    try {
+      final segmentPath = await _audioService.rotateRecording();
+      if (segmentPath.isNotEmpty) {
+        await _transcribeSegment(segmentPath);
+      }
+    } catch (e) {
+      debugPrint('[ConversationPage] Segment processing failed: $e');
+    }
+  }
+
+  /// 转写一段音频并更新 UI
+  Future<void> _transcribeSegment(String audioPath,
+      {bool isFinal = false}) async {
+    _isTranscribing = true;
+
+    try {
+      final notifier = ref.read(conversationProvider.notifier);
+      final asrResult = await notifier.transcribeAudio(audioPath);
+
+      if (asrResult.isNotEmpty) {
+        _streamingAsrText +=
+            (_streamingAsrText.isEmpty ? '' : ' ') + asrResult;
+
+        if (mounted) {
+          setState(() {
+            _textController.text = _streamingAsrText;
+            // 光标移到末尾
+            _textController.selection = TextSelection.fromPosition(
+              TextPosition(offset: _textController.text.length),
+            );
+          });
+
+          // 触发实时翻译（类似文字输入的防抖效果）
+          if (!isFinal && _streamingAsrText.trim().isNotEmpty) {
+            notifier.detectAndTranslate(_streamingAsrText.trim());
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[ConversationPage] Transcription failed: $e');
+    } finally {
+      _isTranscribing = false;
+    }
+  }
+
+  void _toggleVoiceRecording() {
+    if (_isRecording) {
+      _stopVoiceRecording();
+    } else {
+      _startVoiceRecording();
+    }
+  }
+
+  // ============================================================
+  // Navigation & TTS
+  // ============================================================
 
   void _openHistory() {
     Navigator.of(context).push(
@@ -229,41 +353,17 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
     _ttsService.speak(state.realtimeTranslation, lang);
   }
 
-  /// 语言切换时触发模型下载
   void _onLanguageChanged() async {
     await _ensureModelReady();
   }
 
-  /// 输入框失焦 → 视为输入完成，进入双语展示+发音界面
-  void _onFocusChanged() {
-    if (_textFocusNode.hasFocus) return; // 获焦时忽略
-
-    final text = _textController.text.trim();
-    if (text.isEmpty) return;
-    if (_isCompleted) return; // 已经是完成态
-
-    _debounceTimer?.cancel();
-
-    final state = ref.read(conversationProvider);
-    final notifier = ref.read(conversationProvider.notifier);
-
-    if (state.realtimeTranslation.isNotEmpty) {
-      // 已有翻译结果 → 直接提交
-      notifier.commitTranslation(text);
-      setState(() => _isCompleted = true);
-    } else if (!state.isTranslating && !state.isDetecting) {
-      // 尚无翻译且未在处理 → 发起完整翻译流程后进入完成态
-      notifier.sendTextMessage(text).then((_) {
-        if (mounted) setState(() => _isCompleted = true);
-      });
-    }
-    // 如果正在翻译中，等翻译完成后再由用户操作
-  }
+  // ============================================================
+  // Build
+  // ============================================================
 
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(conversationProvider);
-    final bottomPadding = MediaQuery.of(context).padding.bottom;
     final hasInput = _textController.text.isNotEmpty;
     final hasTranslation = state.realtimeTranslation.isNotEmpty;
     final isWorking = state.isDetecting || state.isTranslating;
@@ -275,7 +375,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
         leading: IconButton(
           icon: const Icon(Icons.history, size: 26),
           tooltip: '历史对话',
-          onPressed: _openHistory,
+          onPressed: _isRecording ? null : _openHistory,
         ),
         centerTitle: true,
         title: const Text(
@@ -290,39 +390,34 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
           IconButton(
             icon: const Icon(Icons.download_outlined, size: 26),
             tooltip: '模型管理',
-            onPressed: () {
-              Navigator.of(context).pushNamed('/model_download');
-            },
+            onPressed: _isRecording
+                ? null
+                : () => Navigator.of(context).pushNamed('/model_download'),
           ),
         ],
       ),
-      body: Stack(
+      body: Column(
         children: [
-          Column(
-            children: [
-              Expanded(
-                child: GestureDetector(
-                  onTap: () => _textFocusNode.unfocus(),
-                  behavior: HitTestBehavior.opaque,
-                  child: SingleChildScrollView(
-                    padding: const EdgeInsets.symmetric(horizontal: 24),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const SizedBox(height: 16),
-                        _buildSourceArea(state),
-                        if (hasInput || hasTranslation || isWorking)
-                          ..._buildTranslationArea(state),
-                        const SizedBox(height: 32),
-                      ],
-                    ),
-                  ),
+          Expanded(
+            child: GestureDetector(
+              onTap: () => _textFocusNode.unfocus(),
+              behavior: HitTestBehavior.opaque,
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 16),
+                    _buildSourceArea(state),
+                    if (hasInput || hasTranslation || isWorking)
+                      ..._buildTranslationArea(state),
+                    const SizedBox(height: 32),
+                  ],
                 ),
               ),
-              _buildBottomArea(state, bottomPadding),
-            ],
+            ),
           ),
-          if (_isRecording) _buildRecordingOverlay(bottomPadding),
+          _buildBottomArea(state),
         ],
       ),
     );
@@ -346,53 +441,11 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
           const SizedBox(height: 8),
         ],
 
-        // 文本输入
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _textController,
-                focusNode: _textFocusNode,
-                maxLines: 6,
-                minLines: 1,
-                style: const TextStyle(
-                  fontSize: 28,
-                  color: AppTheme.textPrimary,
-                  height: 1.3,
-                  fontWeight: FontWeight.w400,
-                ),
-                decoration: const InputDecoration(
-                  hintText: '输入文字',
-                  hintStyle: TextStyle(
-                    fontSize: 28,
-                    color: AppTheme.textHint,
-                    height: 1.3,
-                    fontWeight: FontWeight.w400,
-                  ),
-                  border: InputBorder.none,
-                  enabledBorder: InputBorder.none,
-                  focusedBorder: InputBorder.none,
-                  filled: false,
-                  contentPadding: EdgeInsets.zero,
-                  isDense: true,
-                ),
-                textInputAction: TextInputAction.done,
-                onSubmitted: _onSubmitted,
-              ),
-            ),
-            if (_textController.text.isNotEmpty && !_isCompleted)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: IconButton(
-                  icon: const Icon(Icons.close, size: 22),
-                  color: AppTheme.textSecondary,
-                  onPressed: _clearAll,
-                  visualDensity: VisualDensity.compact,
-                ),
-              ),
-          ],
-        ),
+        // 录音中 hint 或 文本输入
+        if (_isRecording && _textController.text.isEmpty)
+          _buildRecordingHint()
+        else
+          _buildTextInput(),
 
         // 完成态: 🔊 📋
         if (_isCompleted && state.realtimeTranslation.isNotEmpty) ...[
@@ -421,11 +474,77 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
     );
   }
 
+  /// 录音中提示文字
+  Widget _buildRecordingHint() {
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 8),
+      child: Text(
+        '请开始说话...',
+        style: TextStyle(
+          fontSize: 28,
+          color: AppTheme.textHint,
+          height: 1.3,
+          fontWeight: FontWeight.w400,
+        ),
+      ),
+    );
+  }
+
+  /// 文本输入框
+  Widget _buildTextInput() {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: TextField(
+            controller: _textController,
+            focusNode: _textFocusNode,
+            maxLines: 6,
+            minLines: 1,
+            readOnly: _isRecording, // 录音中输入框只读
+            style: const TextStyle(
+              fontSize: 28,
+              color: AppTheme.textPrimary,
+              height: 1.3,
+              fontWeight: FontWeight.w400,
+            ),
+            decoration: const InputDecoration(
+              hintText: '输入文字',
+              hintStyle: TextStyle(
+                fontSize: 28,
+                color: AppTheme.textHint,
+                height: 1.3,
+                fontWeight: FontWeight.w400,
+              ),
+              border: InputBorder.none,
+              enabledBorder: InputBorder.none,
+              focusedBorder: InputBorder.none,
+              filled: false,
+              contentPadding: EdgeInsets.zero,
+              isDense: true,
+            ),
+            textInputAction: TextInputAction.done,
+            onSubmitted: _onSubmitted,
+          ),
+        ),
+        if (_textController.text.isNotEmpty && !_isCompleted && !_isRecording)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: IconButton(
+              icon: const Icon(Icons.close, size: 22),
+              color: AppTheme.textSecondary,
+              onPressed: _clearAll,
+              visualDensity: VisualDensity.compact,
+            ),
+          ),
+      ],
+    );
+  }
+
   /// 分隔线 + 译文区域
   List<Widget> _buildTranslationArea(ConversationState state) {
     return [
       const SizedBox(height: 12),
-      // 蓝色分隔线
       Container(
         height: 2,
         decoration: BoxDecoration(
@@ -488,11 +607,13 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
     ];
   }
 
-  /// 底部区域: 语言栏 + 麦克风
-  Widget _buildBottomArea(ConversationState state, double bottomPadding) {
+  /// 底部区域: 语言栏 + 麦克风/停止按钮
+  Widget _buildBottomArea(ConversationState state) {
     return Container(
       decoration: BoxDecoration(
-        color: AppTheme.backgroundGrey,
+        color: _isRecording
+            ? const Color(0xFF1A1A2E) // 录音时深色背景
+            : AppTheme.backgroundGrey,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
         boxShadow: [
           BoxShadow(
@@ -509,42 +630,36 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              // 拖拽指示条
               Center(
                 child: Container(
                   width: 36,
                   height: 4,
                   decoration: BoxDecoration(
-                    color: Colors.grey[350],
+                    color: _isRecording
+                        ? Colors.white.withValues(alpha: 0.3)
+                        : Colors.grey[350],
                     borderRadius: BorderRadius.circular(2),
                   ),
                 ),
               ),
               const SizedBox(height: 16),
-              LanguageBar(onLanguageChanged: _onLanguageChanged),
-              const SizedBox(height: 20),
-              GestureDetector(
-                onTap: _toggleVoiceRecording,
-                child: Container(
-                  width: 80,
-                  height: 80,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: const Color(0xFFD3E3FD),
-                    boxShadow: [
-                      BoxShadow(
-                        color: AppTheme.secondaryBlue.withValues(alpha: 0.15),
-                        blurRadius: 12,
-                        spreadRadius: 1,
-                      ),
-                    ],
-                  ),
-                  child: const Icon(
-                    Icons.mic,
-                    color: AppTheme.secondaryBlue,
-                    size: 36,
-                  ),
-                ),
+
+              // 录音中显示"转录"标签
+              if (_isRecording) ...[
+                _buildRecordingStatusChip(),
+                const SizedBox(height: 16),
+              ],
+
+              // 语言栏（录音时置灰）
+              LanguageBar(
+                onLanguageChanged: _onLanguageChanged,
+                enabled: !_isRecording,
               ),
+              const SizedBox(height: 20),
+
+              // 麦克风 / 停止按钮
+              _buildMicButton(),
               const SizedBox(height: 8),
             ],
           ),
@@ -553,87 +668,108 @@ class _ConversationPageState extends ConsumerState<ConversationPage> {
     );
   }
 
-  /// 录音遮罩
-  Widget _buildRecordingOverlay(double bottomPadding) {
-    return Positioned.fill(
-      child: GestureDetector(
-        onTap: _toggleVoiceRecording,
-        child: Container(
-          color: Colors.black.withValues(alpha: 0.55),
-          child: SafeArea(
-            child: Column(
-              children: [
-                const Spacer(flex: 3),
-                Container(
-                  width: 130,
-                  height: 130,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: Colors.red.withValues(alpha: 0.12),
-                  ),
-                  child: Center(
-                    child: Container(
-                      width: 88,
-                      height: 88,
-                      decoration: const BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: Colors.red,
-                      ),
-                      child: const Icon(
-                        Icons.mic,
-                        color: Colors.white,
-                        size: 44,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 28),
-                const Text(
-                  '正在录音...',
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w500,
-                    color: Colors.white,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  '点击任意位置停止',
-                  style: TextStyle(
-                    fontSize: 15,
-                    color: Colors.white.withValues(alpha: 0.6),
-                  ),
-                ),
-                const Spacer(flex: 2),
-                Padding(
-                  padding: EdgeInsets.only(bottom: 40 + bottomPadding),
-                  child: Container(
-                    width: 72,
-                    height: 72,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: Colors.red,
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.red.withValues(alpha: 0.4),
-                          blurRadius: 20,
-                          spreadRadius: 2,
-                        ),
-                      ],
-                    ),
-                    child: const Icon(
-                      Icons.stop,
-                      color: Colors.white,
-                      size: 32,
-                    ),
-                  ),
-                ),
-              ],
+  /// 录音状态标签
+  Widget _buildRecordingStatusChip() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppTheme.secondaryBlue.withValues(alpha: 0.8),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: const BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.redAccent,
             ),
           ),
-        ),
+          const SizedBox(width: 8),
+          Icon(
+            Icons.record_voice_over,
+            color: Colors.white.withValues(alpha: 0.9),
+            size: 18,
+          ),
+          const SizedBox(width: 6),
+          Text(
+            '转录',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.9),
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
       ),
     );
+  }
+
+  /// 麦克风 / 停止按钮
+  Widget _buildMicButton() {
+    if (_isRecording) {
+      // 录音中 — 停止按钮 + 脉冲动画
+      return AnimatedBuilder(
+        animation: _pulseAnimation,
+        builder: (context, child) {
+          return GestureDetector(
+            onTap: _toggleVoiceRecording,
+            child: Transform.scale(
+              scale: _pulseAnimation.value,
+              child: Container(
+                width: 80,
+                height: 80,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.redAccent.withValues(alpha: 0.15),
+                  border: Border.all(
+                    color: Colors.redAccent.withValues(alpha: 0.3),
+                    width: 3,
+                  ),
+                ),
+                child: Center(
+                  child: Container(
+                    width: 28,
+                    height: 28,
+                    decoration: BoxDecoration(
+                      color: Colors.redAccent,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      );
+    } else {
+      // 正常 — 麦克风按钮
+      return GestureDetector(
+        onTap: _toggleVoiceRecording,
+        child: Container(
+          width: 80,
+          height: 80,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: const Color(0xFFD3E3FD),
+            boxShadow: [
+              BoxShadow(
+                color: AppTheme.secondaryBlue.withValues(alpha: 0.15),
+                blurRadius: 12,
+                spreadRadius: 1,
+              ),
+            ],
+          ),
+          child: const Icon(
+            Icons.mic,
+            color: AppTheme.secondaryBlue,
+            size: 36,
+          ),
+        ),
+      );
+    }
   }
 }
 

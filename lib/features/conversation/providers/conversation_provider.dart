@@ -330,6 +330,22 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     }
   }
 
+
+  /// 仅做语音转文字（供流式录音调用）
+  Future<String> transcribeAudio(String audioPath) async {
+    try {
+      final asrResult = await _asrService.transcribe(audioPath);
+      final text = asrResult.text.trim();
+      if (text.isNotEmpty) {
+        debugPrint('[ConversationNotifier] transcribeAudio: "$text"');
+      }
+      return text;
+    } catch (e) {
+      debugPrint('[ConversationNotifier] transcribeAudio failed: $e');
+      return '';
+    }
+  }
+
   void clearMessages() {
     state = state.copyWith(messages: []);
   }

@@ -11,7 +11,14 @@ class LanguageBar extends ConsumerWidget {
   /// 语言切换后的回调
   final VoidCallback? onLanguageChanged;
 
-  const LanguageBar({super.key, this.onLanguageChanged});
+  /// 是否可交互（录音时置灰）
+  final bool enabled;
+
+  const LanguageBar({
+    super.key,
+    this.onLanguageChanged,
+    this.enabled = true,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -19,32 +26,38 @@ class LanguageBar extends ConsumerWidget {
     final myLang = state.myLanguage;
     final theirLang = state.theirLanguage;
 
-    return Row(
-      children: [
-        // 左侧语言
-        Expanded(
-          child: _LangPill(
-            label: LanguageCodes.getDisplayName(myLang),
-            onTap: () => _showPicker(context, ref, isSource: true),
-          ),
+    return Opacity(
+      opacity: enabled ? 1.0 : 0.4,
+      child: IgnorePointer(
+        ignoring: !enabled,
+        child: Row(
+          children: [
+            // 左侧语言
+            Expanded(
+              child: _LangPill(
+                label: LanguageCodes.getDisplayName(myLang),
+                onTap: () => _showPicker(context, ref, isSource: true),
+              ),
+            ),
+            // 中间切换 icon
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Icon(
+                Icons.swap_horiz,
+                color: AppTheme.textSecondary,
+                size: 28,
+              ),
+            ),
+            // 右侧语言
+            Expanded(
+              child: _LangPill(
+                label: LanguageCodes.getDisplayName(theirLang),
+                onTap: () => _showPicker(context, ref, isSource: false),
+              ),
+            ),
+          ],
         ),
-        // 中间切换 icon（仅展示，不可点击）
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          child: Icon(
-            Icons.swap_horiz,
-            color: AppTheme.textSecondary,
-            size: 28,
-          ),
-        ),
-        // 右侧语言
-        Expanded(
-          child: _LangPill(
-            label: LanguageCodes.getDisplayName(theirLang),
-            onTap: () => _showPicker(context, ref, isSource: false),
-          ),
-        ),
-      ],
+      ),
     );
   }
 
@@ -70,7 +83,6 @@ class LanguageBar extends ConsumerWidget {
             notifier.setTheirLanguage(code);
           }
           Navigator.of(context).pop();
-          // 语言切换后触发回调（可用于触发模型下载检查）
           onLanguageChanged?.call();
         },
       ),
