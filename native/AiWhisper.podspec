@@ -26,6 +26,7 @@ Pod::Spec.new do |s|
     "#{whisper_dir}/ggml/src/ggml-alloc.c",
     "#{whisper_dir}/ggml/src/ggml-backend.cpp",
     "#{whisper_dir}/ggml/src/ggml-backend-reg.cpp",
+    "#{whisper_dir}/ggml/src/ggml-backend-dl.h",
     "#{whisper_dir}/ggml/src/ggml-quants.c",
     "#{whisper_dir}/ggml/src/ggml-opt.cpp",
     "#{whisper_dir}/ggml/src/ggml-threading.cpp",
@@ -99,7 +100,6 @@ Pod::Spec.new do |s|
     "#{whisper_dir}/ggml/src/ggml-cpu/amx/**",
     "#{whisper_dir}/ggml/src/ggml-cpu/spacemit/**",
     "#{whisper_dir}/ggml/src/ggml-cpu/kleidiai/**",
-    "#{whisper_dir}/ggml/src/ggml-backend-dl.cpp",
   ]
 
   s.static_framework = true
@@ -113,7 +113,6 @@ Pod::Spec.new do |s|
       'GGML_METAL_EMBED_LIBRARY=0',
       'GGML_USE_CPU=1',
       'NDEBUG=1',
-      'WHISPER_USE_COREML=0',
       'ACCELERATE_NEW_LAPACK=1',
       '_DARWIN_C_SOURCE=1',
     ].join(' '),
