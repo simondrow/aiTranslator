@@ -194,6 +194,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
     // 递增版本号，标记新请求
     final gen = ++_translateGeneration;
+    debugPrint('[ConversationNotifier] ▶ detectAndTranslate 开始 (gen=$gen) text="${text.length > 30 ? text.substring(0, 30) + "..." : text}"');
 
     if (mounted) state = state.copyWith(isDetecting: true);
 
@@ -292,6 +293,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
     // 取消进行中的实时翻译
     final gen = ++_translateGeneration;
+    debugPrint('[ConversationNotifier] ▶ sendTextMessage 开始 (gen=$gen) text="${text.length > 30 ? text.substring(0, 30) + "..." : text}"');
 
     state = state.copyWith(isProcessing: true);
 
@@ -342,6 +344,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   /// 发送语音消息
   Future<void> sendVoiceMessage(String audioPath) async {
     state = state.copyWith(isProcessing: true);
+    debugPrint('[ConversationNotifier] ▶ sendVoiceMessage 开始 audioPath=$audioPath');
 
     try {
       // ASR: 语音 → 文本
