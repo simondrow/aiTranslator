@@ -61,7 +61,10 @@ Pod::Spec.new do |s|
     "#{whisper_dir}/ggml/src/ggml-cpu/arch-fallback.h",
 
     # ggml-cpu ARM (NEON) architecture-specific
-    "#{whisper_dir}/ggml/src/ggml-cpu/arch/arm/*.{c,cpp,h}",
+    "#{whisper_dir}/ggml/src/ggml-cpu/arch/arm/arm_quants.c",
+    "#{whisper_dir}/ggml/src/ggml-cpu/arch/arm/arm_repack.cpp",
+    "#{whisper_dir}/ggml/src/ggml-cpu/arch/arm/cpu-feats.cpp",
+    "#{whisper_dir}/ggml/src/ggml-cpu/arch/arm/*.h",
 
     # ggml-cpu llamafile SGEMM
     "#{whisper_dir}/ggml/src/ggml-cpu/llamafile/sgemm.cpp",
