@@ -23,14 +23,19 @@ if(AI_BUILD_WHISPER)
     endif()
 
     add_library(ai_whisper SHARED
-        bridge/whisper_bridge.c
+        bridge/whisper_bridge.cpp
     )
     target_include_directories(ai_whisper PRIVATE
         bridge
+        third_party/whisper.cpp/include
         third_party/whisper.cpp
     )
     if(TARGET whisper)
         target_link_libraries(ai_whisper PRIVATE whisper)
+        target_compile_definitions(ai_whisper PRIVATE AI_HAS_WHISPER)
+        message(STATUS "Whisper: whisper.cpp target found, AI_HAS_WHISPER enabled")
+    else()
+        message(WARNING "Whisper: whisper target not found, bridge will be in stub mode")
     endif()
 endif()
 
@@ -47,7 +52,6 @@ if(AI_BUILD_NLLB)
     target_include_directories(ai_nllb PRIVATE bridge)
     set_target_properties(ai_nllb PROPERTIES CXX_STANDARD 17)
 
-    # If CTranslate2 and SentencePiece are built and available
     if(EXISTS ${CTRANSLATE2_DIR}/lib/libctranslate2.a AND
        EXISTS ${SENTENCEPIECE_DIR}/lib/libsentencepiece.a)
         target_include_directories(ai_nllb PRIVATE

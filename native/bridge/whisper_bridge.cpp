@@ -1,6 +1,8 @@
 #include "whisper_bridge.h"
 
+#ifdef __APPLE__
 #include <TargetConditionals.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -237,11 +239,16 @@ ai_whisper_context* ai_whisper_init(const char* model_path) {
 #ifdef AI_HAS_WHISPER
     struct whisper_context_params cparams = whisper_context_default_params();
     // Use GPU on real device, disable on Simulator (MTLSimDriver crashes on XPC shmem)
-#if TARGET_OS_SIMULATOR
+#ifdef __APPLE__
+  #if TARGET_OS_SIMULATOR
     cparams.use_gpu = false;
     fprintf(stderr, "[ai_whisper] Simulator detected - Metal GPU disabled\n");
-#else
+  #else
     cparams.use_gpu = true;
+  #endif
+#else
+    // Android / Linux: no Metal GPU
+    cparams.use_gpu = false;
 #endif
 
     fprintf(stderr, "[ai_whisper] loading model: %s\n", model_path);
