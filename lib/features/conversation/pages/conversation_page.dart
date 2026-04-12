@@ -33,6 +33,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
   bool _isCompleted = false;
   bool _firstInteraction = true;
   bool _isStopping = false; // 正在停止录音中（防止重复停止）
+  bool _stopRequested = false; // 录音停止已请求，正在进行的非final ASR应丢弃
 
   /// 流式 ASR 状态
   Timer? _segmentTimer;
@@ -175,8 +176,49 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     });
   }
 
+  /// 完全重置回初始状态（X 按钮）
+  /// 取消所有后台 ASR/翻译任务，清空输入和结果，收起键盘
+  void _resetToInitial() {
+    debugPrint('[ConversationPage] 重置到初始状态');
+    // 1. 取消所有定时器
+    _debounceTimer?.cancel();
+    _segmentTimer?.cancel();
+    _segmentTimer = null;
+
+    // 2. 如果正在录音，停止录音（不处理最后一段）
+    if (_isRecording) {
+      _pulseController.stop();
+      _pulseController.reset();
+      _audioService.stopRecording(); // fire and forget
+    }
+
+    // 3. 取消所有 ASR 和翻译任务
+    _stopRequested = true;
+    _isTranscribing = false;
+    ref.read(conversationProvider.notifier).cancelAndClear();
+
+    // 4. 收起键盘
+    _textFocusNode.unfocus();
+
+    // 5. 清空所有 UI 状态
+    _previousText = '';
+    setState(() {
+      _textController.clear();
+      _isRecording = false;
+      _isCompleted = false;
+      _isStopping = false;
+      _stopRequested = false;
+      _streamingAsrText = '';
+      _firstInteraction = true; // 允许下次交互重新触发模型下载检查
+    });
+  }
+
   void _onFocusChanged() {
-    if (_textFocusNode.hasFocus) return;
+    if (_textFocusNode.hasFocus) {
+      // 获取焦点时刷新 UI（显示 X 按钮）
+      setState(() {});
+      return;
+    }
 
     final text = _textController.text.trim();
     if (text.isEmpty) return;
@@ -233,6 +275,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
         _isRecording = true;
         _isCompleted = false;
         _isStopping = false;
+        _stopRequested = false;
         _streamingAsrText = '';
         _textController.text = '';
       });
@@ -254,6 +297,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
   Future<void> _stopVoiceRecording() async {
     if (!_isRecording) return;
     _isStopping = true;
+    _stopRequested = true; // 标记：让正在进行的非final ASR丢弃结果
 
     // 停止定时器和动画
     _segmentTimer?.cancel();
@@ -261,10 +305,15 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     _pulseController.stop();
     _pulseController.reset();
 
+    // 取消进行中的翻译（debounce 触发的）
+    _debounceTimer?.cancel();
+    ref.read(conversationProvider.notifier).cancelTranslation();
+
     setState(() => _isRecording = false);
 
     try {
-      // 停止录音并处理最后一段
+      // 停止录音并处理最后一段（正在进行的非final ASR会被 _stopRequested 过滤）
+      debugPrint('[ConversationPage] 语音停止: 处理最后一段音频');
       final path = await _audioService.stopRecording();
       if (path.isNotEmpty) {
         await _transcribeSegment(path, isFinal: true);
@@ -303,6 +352,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
       debugPrint('[ConversationPage] Stop recording failed: $e');
     } finally {
       _isStopping = false;
+      _stopRequested = false;
       if (mounted) setState(() {});
     }
   }
@@ -327,8 +377,20 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     _isTranscribing = true;
 
     try {
+      // 如果录音已停止且不是最后一段，直接丢弃（加速停止响应）
+      if (_stopRequested && !isFinal) {
+        debugPrint('[ConversationPage] ASR 任务被跳过 (非final段, 录音已停止)');
+        return;
+      }
+
       final notifier = ref.read(conversationProvider.notifier);
       final asrResult = await notifier.transcribeAudio(audioPath);
+
+      // ASR 完成后再次检查：如果已请求停止且不是 final，丢弃结果
+      if (_stopRequested && !isFinal) {
+        debugPrint('[ConversationPage] ASR 结果丢弃 (非final段, 录音已停止)');
+        return;
+      }
 
       // 过滤 [BLANK_AUDIO], [music], [cow mooing] 等无效标记
       final cleanResult = ConversationNotifier.cleanAsrText(asrResult);
@@ -573,13 +635,14 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
             onSubmitted: _onSubmitted,
           ),
         ),
-        if (_textController.text.isNotEmpty && !_isCompleted && !_isRecording)
+        if ((_textController.text.isNotEmpty || _textFocusNode.hasFocus) &&
+            !_isCompleted && !_isRecording)
           Padding(
             padding: const EdgeInsets.only(top: 6),
             child: IconButton(
               icon: const Icon(Icons.close, size: 22),
               color: AppTheme.textSecondary,
-              onPressed: _clearAll,
+              onPressed: _resetToInitial,
               visualDensity: VisualDensity.compact,
             ),
           ),
