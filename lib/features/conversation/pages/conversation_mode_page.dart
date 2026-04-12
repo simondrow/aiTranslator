@@ -90,20 +90,42 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               itemCount: messages.length,
               itemBuilder: (context, index) {
-                return _HistoryBubble(
-                  message: messages[index],
-                  onTtsOriginal: () {
-                    _ttsService.speak(
-                      messages[index].originalText,
-                      messages[index].sourceLanguage,
-                    );
+                final msg = messages[index];
+                return Dismissible(
+                  key: ValueKey('${msg.timestamp.millisecondsSinceEpoch}_$index'),
+                  direction: DismissDirection.endToStart,
+                  background: Container(
+                    alignment: Alignment.centerRight,
+                    padding: const EdgeInsets.only(right: 24),
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.redAccent.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: const Icon(Icons.delete_outline,
+                        color: Colors.redAccent, size: 28),
+                  ),
+                  confirmDismiss: (direction) async {
+                    return true;
                   },
-                  onTtsTranslated: () {
-                    _ttsService.speak(
-                      messages[index].translatedText,
-                      messages[index].targetLanguage,
-                    );
+                  onDismissed: (direction) {
+                    ref.read(conversationProvider.notifier).removeMessageAt(index);
                   },
+                  child: _HistoryBubble(
+                    message: msg,
+                    onTtsOriginal: () {
+                      _ttsService.speak(
+                        msg.originalText,
+                        msg.sourceLanguage,
+                      );
+                    },
+                    onTtsTranslated: () {
+                      _ttsService.speak(
+                        msg.translatedText,
+                        msg.targetLanguage,
+                      );
+                    },
+                  ),
                 );
               },
             ),

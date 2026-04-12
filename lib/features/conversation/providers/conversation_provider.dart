@@ -346,6 +346,15 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     }
   }
 
+  /// 删除指定位置的消息
+  void removeMessageAt(int index) {
+    final updated = List<Message>.from(state.messages);
+    if (index >= 0 && index < updated.length) {
+      updated.removeAt(index);
+      state = state.copyWith(messages: updated);
+    }
+  }
+
   void clearMessages() {
     state = state.copyWith(messages: []);
   }

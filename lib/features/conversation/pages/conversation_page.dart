@@ -32,7 +32,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
   bool _isRecording = false;
   bool _isCompleted = false;
   bool _firstInteraction = true;
-  bool _isProcessingVoice = false; // 防止录音停止过程中重复点击
+  bool _isStopping = false; // 正在停止录音中（防止重复停止）
 
   /// 流式 ASR 状态
   Timer? _segmentTimer;
@@ -198,6 +198,12 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
   // ============================================================
 
   Future<void> _startVoiceRecording() async {
+    // 先清理之前的状态，确保干净开始
+    _debounceTimer?.cancel();
+    _segmentTimer?.cancel();
+    _isTranscribing = false;
+    _streamingAsrText = '';
+
     await _ensureModelReady();
 
     // 确保 whisper 模型后台下载
@@ -208,14 +214,20 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
 
     try {
       _textFocusNode.unfocus();
+
+      // 如果上一次录音的 AudioService 还处于录音态（异常情况），先停止
+      if (_audioService.isRecording) {
+        await _audioService.stopRecording();
+      }
+
       await _audioService.startRecording();
 
-      _debounceTimer?.cancel();
       ref.read(conversationProvider.notifier).clearRealtime();
 
       setState(() {
         _isRecording = true;
         _isCompleted = false;
+        _isStopping = false;
         _streamingAsrText = '';
         _textController.text = '';
       });
@@ -230,13 +242,13 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
       });
     } catch (e) {
       debugPrint('[ConversationPage] Start recording failed: $e');
-      _isProcessingVoice = false;
+      // start failed, nothing to clean up
     }
   }
 
   Future<void> _stopVoiceRecording() async {
     if (!_isRecording) return;
-    _isProcessingVoice = true;
+    _isStopping = true;
 
     // 停止定时器和动画
     _segmentTimer?.cancel();
@@ -274,7 +286,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     } catch (e) {
       debugPrint('[ConversationPage] Stop recording failed: $e');
     } finally {
-      _isProcessingVoice = false;
+      _isStopping = false;
       if (mounted) setState(() {});
     }
   }
@@ -335,8 +347,8 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
   }
 
   void _toggleVoiceRecording() {
-    if (_isProcessingVoice) return; // 防止重复点击
     if (_isRecording) {
+      if (_isStopping) return; // 防止重复停止
       _stopVoiceRecording();
     } else {
       _startVoiceRecording();
