@@ -3,72 +3,75 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
-import 'translation_isolate.dart';
-import '../utils/language_codes.dart';
+import 'hymt_translator.dart';
 
 /// 翻译服务
-/// 使用 NLLB-200-distilled-600M ONNX quantized 模型实现离线翻译。
-/// 翻译在后台 Isolate 中执行，不阻塞 UI 线程。
+/// 使用 HY-MT1.5-1.8B (GGUF via llama.cpp) 实现离线翻译。
+/// 推理在 native 层异步执行，不阻塞 UI 线程。
 /// 模型未加载时使用 stub 返回占位结果。
 class TranslationService {
-  TranslationIsolate? _isolate;
+  HymtTranslator? _translator;
   bool _isInitialized = false;
   bool _isInitializing = false;
-  String? _modelDir;
+  String? _modelPath;
 
   bool get isInitialized => _isInitialized;
 
-  /// 检查引擎是否真正就绪 (ONNX 模型已加载，非 stub)
-  bool get isEngineReady => _isolate?.isReady ?? false;
+  /// 检查引擎是否真正就绪 (GGUF 模型已加载)
+  bool get isEngineReady => _translator?.isReady ?? false;
 
-  /// 初始化 NLLB 模型（在后台 Isolate 中加载）
-  /// [modelDir] ONNX 模型目录 (包含 encoder/decoder onnx + tokenizer.json)
+  /// 初始化 HY-MT 翻译模型
+  /// [modelDir] 模型目录 (包含 .gguf 文件)
   Future<void> initialize(String modelDir) async {
-    if (_isInitialized && _modelDir == modelDir && isEngineReady) return;
+    if (_isInitialized && _modelPath == modelDir && isEngineReady) return;
     if (_isInitializing) return;
 
     _isInitializing = true;
-    _modelDir = modelDir;
+    _modelPath = modelDir;
 
-    // 检查必要文件
-    final requiredFiles = [
-      'encoder_model_quantized.onnx',
-      'decoder_model_merged_quantized.onnx',
-      'tokenizer.json',
-    ];
-
-    for (final fname in requiredFiles) {
-      if (!File('$modelDir/$fname').existsSync()) {
-        debugPrint('[TranslationService] 缺少文件: $modelDir/$fname');
-        debugPrint('[TranslationService] 将以 stub 模式运行');
-        _isInitialized = true;
-        _isInitializing = false;
-        return;
-      }
+    // 查找 GGUF 文件
+    final ggufFile = _findGgufFile(modelDir);
+    if (ggufFile == null) {
+      debugPrint('[TranslationService] 未找到 GGUF 文件: $modelDir');
+      debugPrint('[TranslationService] 将以 stub 模式运行');
+      _isInitialized = true;
+      _isInitializing = false;
+      return;
     }
 
     try {
-      _isolate?.dispose();
-      _isolate = TranslationIsolate();
-      final ok = await _isolate!.initialize(modelDir);
+      _translator = HymtTranslator();
+      await _translator!.initialize(ggufFile);
       _isInitialized = true;
 
-      if (ok) {
-        debugPrint('[TranslationService] NLLB 后台 Isolate 已就绪');
+      if (_translator!.isReady) {
+        debugPrint('[TranslationService] HY-MT 翻译引擎已就绪');
       } else {
-        debugPrint('[TranslationService] NLLB 初始化失败，将以 stub 模式运行');
-        _isolate?.dispose();
-        _isolate = null;
+        debugPrint('[TranslationService] HY-MT 初始化失败，将以 stub 模式运行');
+        _translator = null;
       }
     } catch (e) {
-      debugPrint('[TranslationService] NLLB 初始化失败: $e');
+      debugPrint('[TranslationService] HY-MT 初始化失败: $e');
       debugPrint('[TranslationService] 将以 stub 模式运行');
-      _isolate?.dispose();
-      _isolate = null;
+      _translator = null;
       _isInitialized = true;
     } finally {
       _isInitializing = false;
     }
+  }
+
+  /// 在 modelDir 中查找 .gguf 文件
+  String? _findGgufFile(String modelDir) {
+    final dir = Directory(modelDir);
+    if (!dir.existsSync()) return null;
+
+    try {
+      final files = dir.listSync().whereType<File>();
+      for (final f in files) {
+        if (f.path.endsWith('.gguf')) return f.path;
+      }
+    } catch (_) {}
+    return null;
   }
 
   /// 尝试从默认下载目录自动初始化
@@ -77,14 +80,11 @@ class TranslationService {
 
     try {
       final appDir = await getApplicationDocumentsDirectory();
-      final modelDir = '${appDir.path}/models/nllb-onnx';
+      final modelDir = '${appDir.path}/models/hymt';
 
-      // 检查关键模型文件是否存在
-      final encoder = File('$modelDir/encoder_model_quantized.onnx');
-      final decoder = File('$modelDir/decoder_model_merged_quantized.onnx');
-      final tokenizer = File('$modelDir/tokenizer.json');
-
-      if (encoder.existsSync() && decoder.existsSync() && tokenizer.existsSync()) {
+      // 检查是否有 GGUF 文件
+      final ggufFile = _findGgufFile(modelDir);
+      if (ggufFile != null) {
         await initialize(modelDir);
         return isEngineReady;
       }
@@ -94,9 +94,9 @@ class TranslationService {
     return false;
   }
 
-  /// 翻译文本（在后台 Isolate 中执行，不阻塞 UI）
-  ///
-  /// NLLB 未初始化时返回 stub 结果: "[目标语言] 原文"
+  /// 翻译文本
+  /// [fromLang] / [toLang] 使用 ISO 短代码 (zh, en, ja, ko, ...)
+  /// HY-MT 原生支持短代码，无需转换
   Future<String> translate(
     String text,
     String fromLang,
@@ -106,57 +106,47 @@ class TranslationService {
       return text;
     }
 
-    if (!_isInitialized || _isolate == null || !_isolate!.isReady) {
-      // Stub 模式: NLLB 模型未下载时提供占位翻译
+    if (!_isInitialized || _translator == null || !_translator!.isReady) {
+      // Stub 模式
       debugPrint('[TranslationService] stub 模式 ($fromLang → $toLang)');
       return _stubTranslate(text, fromLang, toLang);
     }
 
     try {
-      return await _isolate!.translate(text, fromLang, toLang);
+      return await _translator!.translate(text, fromLang, toLang);
     } catch (e) {
       debugPrint('[TranslationService] 翻译失败: $e');
       return _stubTranslate(text, fromLang, toLang);
     }
   }
 
-  /// Stub 翻译 — NLLB 模型未加载时的占位实现
+  /// Stub 翻译 — 模型未加载时的占位实现
   String _stubTranslate(String text, String fromLang, String toLang) {
-    final targetName = _nllbToDisplayName(toLang);
+    final targetName = _langDisplayName(toLang);
     return '[$targetName] $text';
   }
 
-  /// NLLB 代码转显示名称
-  String _nllbToDisplayName(String nllbCode) {
+  String _langDisplayName(String code) {
     const map = {
-      'zho_Hans': '中文',
-      'eng_Latn': 'English',
-      'jpn_Jpan': '日本語',
-      'kor_Hang': '한국어',
-      'fra_Latn': 'Français',
-      'deu_Latn': 'Deutsch',
-      'rus_Cyrl': 'Русский',
-      'spa_Latn': 'Español',
-      'ita_Latn': 'Italiano',
+      'zh': '中文',
+      'en': 'English',
+      'ja': '日本語',
+      'ko': '한국어',
+      'fr': 'Français',
+      'de': 'Deutsch',
+      'ru': 'Русский',
+      'es': 'Español',
+      'it': 'Italiano',
+      'th': 'ภาษาไทย',
+      'vi': 'Tiếng Việt',
     };
-    return map[nllbCode] ?? nllbCode;
-  }
-
-  /// 便捷方法: 使用短语言代码进行翻译
-  Future<String> translateWithShortCodes(
-    String text,
-    String fromCode,
-    String toCode,
-  ) async {
-    final fromNllb = LanguageCodes.getNllbCode(fromCode);
-    final toNllb = LanguageCodes.getNllbCode(toCode);
-    return translate(text, fromNllb, toNllb);
+    return map[code] ?? code;
   }
 
   /// 释放资源
   void dispose() {
-    _isolate?.dispose();
-    _isolate = null;
+    _translator?.dispose();
+    _translator = null;
     _isInitialized = false;
   }
 }

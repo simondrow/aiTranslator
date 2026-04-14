@@ -40,37 +40,30 @@ class ModelInfo {
   }
 
   // =============================================================
-  // NLLB ONNX quantized 翻译模型
-  // 来源: HuggingFace Xenova/nllb-200-distilled-600M
+  // HY-MT1.5-1.8B GGUF 翻译模型 (替代 NLLB)
+  // 来源: Tencent HunyuanTranslation
+  // Q4_K_M 量化, ~1.13GB, 支持 33 种语言
+  // 通过 llama.cpp (flutter_llama) 推理
   // =============================================================
-  static const String nllbModelType = 'nllb-onnx';
-  static const String nllbModelDirName = 'nllb-onnx';
+  static const String hymtModelType = 'hymt';
+  static const String hymtModelDirName = 'hymt';
+  static const String hymtModelFileName = 'HY-MT1.5-1.8B-Q4_K_M.gguf';
 
-  /// NLLB 模型需要下载的所有文件
-  static List<NllbModelFile> get nllbModelFiles => const [
-        NllbModelFile(
-          name: 'encoder_model_quantized.onnx',
-          url: 'https://huggingface.co/Xenova/nllb-200-distilled-600M/resolve/main/onnx/encoder_model_quantized.onnx',
-          sizeInMB: 419,
-        ),
-        NllbModelFile(
-          name: 'decoder_model_merged_quantized.onnx',
-          url: 'https://huggingface.co/Xenova/nllb-200-distilled-600M/resolve/main/onnx/decoder_model_merged_quantized.onnx',
-          sizeInMB: 476,
-        ),
-        NllbModelFile(
-          name: 'tokenizer.json',
-          url: 'https://huggingface.co/Xenova/nllb-200-distilled-600M/resolve/main/tokenizer.json',
-          sizeInMB: 17,
+  /// HY-MT 模型下载文件列表 (单文件)
+  static List<HymtModelFile> get hymtModelFiles => const [
+        HymtModelFile(
+          name: 'HY-MT1.5-1.8B-Q4_K_M.gguf',
+          url: 'https://huggingface.co/tencent/HY-MT1.5-1.8B-GGUF/resolve/main/HY-MT1.5-1.8B-Q4_K_M.gguf',
+          sizeInMB: 1157,
         ),
       ];
 
-  /// NLLB 模型总大小 (MB)
-  static double get nllbTotalSizeMB =>
-      nllbModelFiles.fold(0, (sum, f) => sum + f.sizeInMB);
+  /// HY-MT 模型总大小 (MB)
+  static double get hymtTotalSizeMB =>
+      hymtModelFiles.fold(0.0, (sum, f) => sum + f.sizeInMB);
 
   // =============================================================
-  // SenseVoice 语音识别模型 (替代 Whisper)
+  // SenseVoice 语音识别模型
   // 来源: sherpa-onnx 预转换模型
   // Non-autoregressive，推理速度极快（<1s per segment on mobile）
   // 支持: 中文、英文、日文、韩文、粤语
@@ -97,8 +90,16 @@ class ModelInfo {
       senseVoiceModelFiles.fold(0.0, (sum, f) => sum + f.sizeInMB);
 
   // =============================================================
-  // [DEPRECATED] Whisper 语音识别模型 — 已被 SenseVoice 替代
+  // [DEPRECATED] NLLB — 已被 HY-MT1.5 替代
   // 保留常量以兼容迁移
+  // =============================================================
+  @Deprecated('Use hymtModelType instead')
+  static const String nllbModelType = 'nllb-onnx';
+  @Deprecated('Use hymtModelDirName instead')
+  static const String nllbModelDirName = 'nllb-onnx';
+
+  // =============================================================
+  // [DEPRECATED] Whisper — 已被 SenseVoice 替代
   // =============================================================
   static const String whisperModelType = 'whisper';
   static const String whisperModelDirName = 'whisper';
@@ -115,22 +116,22 @@ class ModelInfo {
           modelType: senseVoiceModelType,
         ),
         ModelInfo(
-          name: 'NLLB-200 ONNX (翻译)',
-          url: '', // 多文件下载，url 在 nllbModelFiles 中
-          fileName: nllbModelDirName,
-          sizeInMB: nllbTotalSizeMB,
-          modelType: nllbModelType,
+          name: 'HY-MT1.5 (翻译)',
+          url: '', // 多文件下载，url 在 hymtModelFiles 中
+          fileName: hymtModelDirName,
+          sizeInMB: hymtTotalSizeMB,
+          modelType: hymtModelType,
         ),
       ];
 }
 
-/// NLLB 模型单个文件信息
-class NllbModelFile {
+/// HY-MT 模型单个文件信息
+class HymtModelFile {
   final String name;
   final String url;
   final double sizeInMB;
 
-  const NllbModelFile({
+  const HymtModelFile({
     required this.name,
     required this.url,
     required this.sizeInMB,

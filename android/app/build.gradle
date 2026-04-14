@@ -37,9 +37,10 @@ android {
 
         externalNativeBuild {
             cmake {
-                // Whisper removed — ASR now uses SenseVoice via sherpa_onnx package
+                // ASR: SenseVoice via sherpa_onnx; Translation: HY-MT via flutter_llama
+                // Only fastText native bridge is still needed
                 arguments '-DAI_BUILD_WHISPER=OFF',
-                          '-DAI_BUILD_NLLB=ON',
+                          '-DAI_BUILD_NLLB=OFF',
                           '-DAI_BUILD_FASTTEXT=ON',
                           '-DBUILD_SHARED_LIBS=ON'
                 cppFlags '-O3 -funroll-loops'
@@ -54,16 +55,7 @@ android {
         }
     }
 
-    // Both onnxruntime (NLLB) and sherpa_onnx (SenseVoice) bundle libonnxruntime.so.
-    // sherpa_onnx ships a newer version with OrtGetApiBase; the older one from
-    // onnxruntime package lacks this symbol and causes dlopen failure.
-    // pickFirst keeps whichever appears first in the merge inputs.
-    packagingOptions {
-        pickFirst "lib/arm64-v8a/libonnxruntime.so"
-        pickFirst "lib/armeabi-v7a/libonnxruntime.so"
-        pickFirst "lib/x86_64/libonnxruntime.so"
-        pickFirst "lib/x86/libonnxruntime.so"
-    }
+
 
     buildTypes {
         release { signingConfig signingConfigs.debug }
@@ -74,20 +66,3 @@ flutter { source '../..' }
 
 dependencies {}
 
-// ============================================================
-// Force sherpa_onnx's libonnxruntime.so over onnxruntime package's version.
-//
-// The onnxruntime Flutter package (v1.4.1) ships libonnxruntime.so 14MB
-// which lacks the OrtGetApiBase symbol needed by sherpa-onnx-c-api.so.
-// sherpa_onnx_android ships a newer 19MB version that is backward-compatible.
-//
-// gradle.projectsEvaluated runs after ALL sub-projects are fully configured,
-// so the :onnxruntime project's android plugin is guaranteed to be applied.
-// ============================================================
-gradle.projectsEvaluated {
-    def onnxProj = rootProject.findProject(':onnxruntime')
-    if (onnxProj != null) {
-        onnxProj.android.sourceSets.main.jniLibs.srcDirs = []
-        println "[AITranslator] Cleared onnxruntime jniLibs -- using sherpa_onnx libonnxruntime.so"
-    }
-}

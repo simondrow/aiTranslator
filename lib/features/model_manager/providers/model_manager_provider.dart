@@ -38,8 +38,11 @@ class ModelManagerState {
 
   bool get allModelsReady => models.every((m) => m.isDownloaded);
 
-  bool get isNllbReady =>
-      models.any((m) => m.modelType == ModelInfo.nllbModelType && m.isDownloaded);
+  bool get isHymtReady =>
+      models.any((m) => m.modelType == ModelInfo.hymtModelType && m.isDownloaded);
+
+  /// 向后兼容别名
+  bool get isTranslationReady => isHymtReady;
 
   bool get isSenseVoiceReady =>
       models.any((m) => m.modelType == ModelInfo.senseVoiceModelType && m.isDownloaded);
@@ -75,8 +78,8 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
       for (final model in ModelInfo.requiredModels) {
         bool exists;
 
-        if (model.modelType == ModelInfo.nllbModelType) {
-          exists = await _isNllbModelComplete(modelsDir.path);
+        if (model.modelType == ModelInfo.hymtModelType) {
+          exists = await _isHymtModelComplete(modelsDir.path);
         } else if (model.modelType == ModelInfo.senseVoiceModelType) {
           exists = await _isSenseVoiceModelComplete(modelsDir.path);
         } else {
@@ -98,10 +101,10 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
     }
   }
 
-  Future<bool> _isNllbModelComplete(String modelsBasePath) async {
-    final nllbDir = '$modelsBasePath/${ModelInfo.nllbModelDirName}';
-    for (final fileInfo in ModelInfo.nllbModelFiles) {
-      final file = File('$nllbDir/${fileInfo.name}');
+  Future<bool> _isHymtModelComplete(String modelsBasePath) async {
+    final hymtDir = '$modelsBasePath/${ModelInfo.hymtModelDirName}';
+    for (final fileInfo in ModelInfo.hymtModelFiles) {
+      final file = File('$hymtDir/${fileInfo.name}');
       if (!await file.exists()) return false;
     }
     return true;
@@ -130,9 +133,10 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
     return '${modelsDir.path}/$fileName';
   }
 
-  Future<String> getNllbModelDir() async {
+  /// 获取 HY-MT 模型目录路径
+  Future<String> getHymtModelDir() async {
     final modelsDir = await _getModelsDirectory();
-    return '${modelsDir.path}/${ModelInfo.nllbModelDirName}';
+    return '${modelsDir.path}/${ModelInfo.hymtModelDirName}';
   }
 
   /// 获取 SenseVoice 模型目录路径
@@ -153,8 +157,8 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
     _cancelToken = CancelToken();
 
     try {
-      if (modelInfo.modelType == ModelInfo.nllbModelType) {
-        await _downloadNllbModel(modelInfo);
+      if (modelInfo.modelType == ModelInfo.hymtModelType) {
+        await _downloadHymtModel(modelInfo);
       } else if (modelInfo.modelType == ModelInfo.senseVoiceModelType) {
         await _downloadSenseVoiceModel(modelInfo);
       } else {
@@ -194,6 +198,59 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
 
     if (mounted) {
       _updateModelState(modelInfo.fileName, isDownloaded: true, progress: 1.0);
+      state = state.copyWith(isDownloading: false, downloadingModelName: null);
+    }
+  }
+
+  /// 下载 HY-MT 模型
+  Future<void> _downloadHymtModel(ModelInfo modelInfo) async {
+    final modelsDir = await _getModelsDirectory();
+    final hymtDir =
+        Directory('${modelsDir.path}/${ModelInfo.hymtModelDirName}');
+    if (!await hymtDir.exists()) {
+      await hymtDir.create(recursive: true);
+    }
+
+    final files = ModelInfo.hymtModelFiles;
+    final totalSize = files.fold<double>(0, (s, f) => s + f.sizeInMB);
+    double downloadedSize = 0;
+
+    for (int i = 0; i < files.length; i++) {
+      final fileInfo = files[i];
+      final savePath = '${hymtDir.path}/${fileInfo.name}';
+
+      if (File(savePath).existsSync()) {
+        downloadedSize += fileInfo.sizeInMB;
+        if (mounted) {
+          _updateModelProgress(modelInfo.fileName, downloadedSize / totalSize);
+        }
+        continue;
+      }
+
+      debugPrint(
+          '[ModelManager] 下载 HY-MT ${i + 1}/${files.length}: ${fileInfo.name}');
+
+      final baseDownloaded = downloadedSize;
+      await _dio.download(
+        fileInfo.url,
+        savePath,
+        cancelToken: _cancelToken,
+        onReceiveProgress: (received, total) {
+          if (total > 0 && mounted) {
+            final fileProgress = received / total;
+            final overallProgress =
+                (baseDownloaded + fileInfo.sizeInMB * fileProgress) / totalSize;
+            _updateModelProgress(modelInfo.fileName, overallProgress);
+          }
+        },
+      );
+
+      downloadedSize += fileInfo.sizeInMB;
+    }
+
+    if (mounted) {
+      _updateModelState(modelInfo.fileName,
+          isDownloaded: true, progress: 1.0);
       state = state.copyWith(isDownloading: false, downloadingModelName: null);
     }
   }
@@ -251,58 +308,6 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
     }
   }
 
-  Future<void> _downloadNllbModel(ModelInfo modelInfo) async {
-    final modelsDir = await _getModelsDirectory();
-    final nllbDir =
-        Directory('${modelsDir.path}/${ModelInfo.nllbModelDirName}');
-    if (!await nllbDir.exists()) {
-      await nllbDir.create(recursive: true);
-    }
-
-    final files = ModelInfo.nllbModelFiles;
-    final totalSize = files.fold<double>(0, (s, f) => s + f.sizeInMB);
-    double downloadedSize = 0;
-
-    for (int i = 0; i < files.length; i++) {
-      final fileInfo = files[i];
-      final savePath = '${nllbDir.path}/${fileInfo.name}';
-
-      if (File(savePath).existsSync()) {
-        downloadedSize += fileInfo.sizeInMB;
-        if (mounted) {
-          _updateModelProgress(modelInfo.fileName, downloadedSize / totalSize);
-        }
-        continue;
-      }
-
-      debugPrint(
-          '[ModelManager] 下载 NLLB ${i + 1}/${files.length}: ${fileInfo.name}');
-
-      final baseDownloaded = downloadedSize;
-      await _dio.download(
-        fileInfo.url,
-        savePath,
-        cancelToken: _cancelToken,
-        onReceiveProgress: (received, total) {
-          if (total > 0 && mounted) {
-            final fileProgress = received / total;
-            final overallProgress =
-                (baseDownloaded + fileInfo.sizeInMB * fileProgress) / totalSize;
-            _updateModelProgress(modelInfo.fileName, overallProgress);
-          }
-        },
-      );
-
-      downloadedSize += fileInfo.sizeInMB;
-    }
-
-    if (mounted) {
-      _updateModelState(modelInfo.fileName,
-          isDownloaded: true, progress: 1.0);
-      state = state.copyWith(isDownloading: false, downloadingModelName: null);
-    }
-  }
-
   void cancelDownload() {
     _cancelToken?.cancel('用户取消');
     if (mounted) {
@@ -319,14 +324,15 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
     }
   }
 
-  Future<void> downloadNllbIfNeeded() async {
+  /// 下载 HY-MT 翻译模型（如未下载）
+  Future<void> downloadHymtIfNeeded() async {
     await ensureInitialized();
-    final nllbModel = state.models.firstWhere(
-      (m) => m.modelType == ModelInfo.nllbModelType,
+    final hymtModel = state.models.firstWhere(
+      (m) => m.modelType == ModelInfo.hymtModelType,
       orElse: () => ModelInfo.requiredModels.last,
     );
-    if (!nllbModel.isDownloaded) {
-      await downloadModel(nllbModel);
+    if (!hymtModel.isDownloaded) {
+      await downloadModel(hymtModel);
     }
   }
 

@@ -107,11 +107,11 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     final notifier = ref.read(conversationProvider.notifier);
     if (notifier.isTranslationReady) return true;
 
-    final ready = await ModelDownloadTrigger.ensureNllbReady(context, ref);
+    final ready = await ModelDownloadTrigger.ensureTranslationReady(context, ref);
 
     if (ready) {
       final modelDir =
-          await ref.read(modelManagerProvider.notifier).getNllbModelDir();
+          await ref.read(modelManagerProvider.notifier).getHymtModelDir();
       await notifier.initTranslationEngine(modelDir);
     } else {
       _firstInteraction = true;

@@ -9,14 +9,14 @@ class ModelDownloadTrigger {
   static bool _isDialogShowing = false;
   static bool _hasTriggered = false;
 
-  /// 检查 NLLB 模型是否需要下载，如需要则弹出 loading 对话框
-  static Future<bool> ensureNllbReady(
+  /// 检查翻译模型是否需要下载，如需要则弹出 loading 对话框
+  static Future<bool> ensureTranslationReady(
     BuildContext context,
     WidgetRef ref,
   ) async {
     final state = ref.read(modelManagerProvider);
 
-    if (state.isNllbReady) return true;
+    if (state.isHymtReady) return true;
     if (_isDialogShowing) return false;
 
     _hasTriggered = true;
@@ -27,7 +27,7 @@ class ModelDownloadTrigger {
       barrierDismissible: false,
       builder: (ctx) => ProviderScope(
         parent: ProviderScope.containerOf(context),
-        child: const _NllbDownloadDialog(),
+        child: const _HymtDownloadDialog(),
       ),
     );
 
@@ -43,15 +43,15 @@ class ModelDownloadTrigger {
   }
 }
 
-class _NllbDownloadDialog extends ConsumerStatefulWidget {
-  const _NllbDownloadDialog();
+class _HymtDownloadDialog extends ConsumerStatefulWidget {
+  const _HymtDownloadDialog();
 
   @override
-  ConsumerState<_NllbDownloadDialog> createState() =>
-      _NllbDownloadDialogState();
+  ConsumerState<_HymtDownloadDialog> createState() =>
+      _HymtDownloadDialogState();
 }
 
-class _NllbDownloadDialogState extends ConsumerState<_NllbDownloadDialog> {
+class _HymtDownloadDialogState extends ConsumerState<_HymtDownloadDialog> {
   bool _downloading = false;
   bool _completed = false;
   String? _error;
@@ -75,7 +75,7 @@ class _NllbDownloadDialogState extends ConsumerState<_NllbDownloadDialog> {
       // 确保模型列表已初始化
       await notifier.ensureInitialized();
 
-      await notifier.downloadNllbIfNeeded();
+      await notifier.downloadHymtIfNeeded();
 
       if (mounted) {
         setState(() {
@@ -100,22 +100,22 @@ class _NllbDownloadDialogState extends ConsumerState<_NllbDownloadDialog> {
     // ConsumerStatefulWidget 的 ref.watch 会自动触发 rebuild
     final state = ref.watch(modelManagerProvider);
 
-    ModelInfo nllbModel;
+    ModelInfo hymtModel;
     try {
-      nllbModel = state.models.firstWhere(
-        (m) => m.modelType == ModelInfo.nllbModelType,
+      hymtModel = state.models.firstWhere(
+        (m) => m.modelType == ModelInfo.hymtModelType,
       );
     } catch (_) {
-      nllbModel = ModelInfo(
-        name: 'NLLB-200 ONNX',
+      hymtModel = ModelInfo(
+        name: 'HY-MT1.5',
         url: '',
-        fileName: ModelInfo.nllbModelDirName,
-        sizeInMB: ModelInfo.nllbTotalSizeMB,
-        modelType: ModelInfo.nllbModelType,
+        fileName: ModelInfo.hymtModelDirName,
+        sizeInMB: ModelInfo.hymtTotalSizeMB,
+        modelType: ModelInfo.hymtModelType,
       );
     }
 
-    final progress = nllbModel.downloadProgress;
+    final progress = hymtModel.downloadProgress;
     final progressPercent = (progress * 100).toStringAsFixed(0);
 
     return AlertDialog(
@@ -156,7 +156,7 @@ class _NllbDownloadDialogState extends ConsumerState<_NllbDownloadDialog> {
               const SizedBox(height: 8),
               if (!_completed && _error == null)
                 Text(
-                  'NLLB-200 ONNX (~${ModelInfo.nllbTotalSizeMB.toStringAsFixed(0)} MB)',
+                  'HY-MT1.5 Q4 (~${ModelInfo.hymtTotalSizeMB.toStringAsFixed(0)} MB)',
                   style: TextStyle(fontSize: 14, color: Colors.grey[600]),
                 ),
               if (_downloading) ...[

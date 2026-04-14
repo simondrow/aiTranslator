@@ -246,8 +246,8 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
       final translated = await _translationService.translate(
         cleanText,
-        LanguageCodes.getNllbCode(dir.source),
-        LanguageCodes.getNllbCode(dir.target),
+        dir.source,
+        dir.target,
       );
 
       sw.stop();
@@ -327,8 +327,8 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       final sw = Stopwatch()..start();
       final translated = await _translationService.translate(
         text,
-        LanguageCodes.getNllbCode(dir.source),
-        LanguageCodes.getNllbCode(dir.target),
+        dir.source,
+        dir.target,
       );
       sw.stop();
       debugPrint('[ConversationNotifier] sendTextMessage 翻译完成 ${sw.elapsedMilliseconds}ms');
@@ -389,8 +389,8 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       // 翻译
       final translated = await _translationService.translate(
         text,
-        LanguageCodes.getNllbCode(dir.source),
-        LanguageCodes.getNllbCode(dir.target),
+        dir.source,
+        dir.target,
       );
 
       final message = Message(

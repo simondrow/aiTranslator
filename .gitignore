@@ -97,3 +97,4 @@ assets/models/whisper/
 # SSL debug certificate (not needed in repo)
 all_certs.pem
 flutter_log.txt
+android/build/
