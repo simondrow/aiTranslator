@@ -33,6 +33,9 @@ class AsrService {
   Future<void> initialize(String modelDir) async {
     if (_isInitialized && _modelDir == modelDir) return;
 
+    // Initialize sherpa-onnx native bindings (safe to call multiple times)
+    sherpa_onnx.initBindings();
+
     final modelPath = '$modelDir/model.int8.onnx';
     final tokensPath = '$modelDir/tokens.txt';
 
