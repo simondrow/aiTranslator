@@ -113,7 +113,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       debugPrint('[ConversationNotifier] 翻译引擎自动初始化失败: $e');
     }
 
-    // 3. ASR (whisper.cpp)
+    // 3. ASR (SenseVoice via sherpa-onnx)
     try {
       final ready = await _asrService.tryAutoInitialize();
       debugPrint('[ConversationNotifier] ASR 引擎自动初始化: ${ready ? "成功" : "未就绪 (模型未下载)"}');
@@ -138,7 +138,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     }
   }
 
-  /// 手动初始化 ASR 引擎 (模型下载完成后调用)
+  /// 手动初始化 ASR 引擎 — SenseVoice (模型下载完成后调用)
   Future<void> initAsrEngine(String modelPath) async {
     try {
       await _asrService.initialize(modelPath);

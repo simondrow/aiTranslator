@@ -41,8 +41,11 @@ class ModelManagerState {
   bool get isNllbReady =>
       models.any((m) => m.modelType == ModelInfo.nllbModelType && m.isDownloaded);
 
-  bool get isWhisperReady =>
-      models.any((m) => m.modelType == ModelInfo.whisperModelType && m.isDownloaded);
+  bool get isSenseVoiceReady =>
+      models.any((m) => m.modelType == ModelInfo.senseVoiceModelType && m.isDownloaded);
+
+  /// 向后兼容：ASR 引擎是否就绪
+  bool get isAsrReady => isSenseVoiceReady;
 }
 
 class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
@@ -74,10 +77,8 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
 
         if (model.modelType == ModelInfo.nllbModelType) {
           exists = await _isNllbModelComplete(modelsDir.path);
-        } else if (model.modelType == ModelInfo.whisperModelType) {
-          final file = File(
-              '${modelsDir.path}/${ModelInfo.whisperModelDirName}/${model.fileName}');
-          exists = await file.exists();
+        } else if (model.modelType == ModelInfo.senseVoiceModelType) {
+          exists = await _isSenseVoiceModelComplete(modelsDir.path);
         } else {
           final file = File('${modelsDir.path}/${model.fileName}');
           exists = await file.exists();
@@ -106,6 +107,15 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
     return true;
   }
 
+  Future<bool> _isSenseVoiceModelComplete(String modelsBasePath) async {
+    final svDir = '$modelsBasePath/${ModelInfo.senseVoiceModelDirName}';
+    for (final fileInfo in ModelInfo.senseVoiceModelFiles) {
+      final file = File('$svDir/${fileInfo.name}');
+      if (!await file.exists()) return false;
+    }
+    return true;
+  }
+
   Future<Directory> _getModelsDirectory() async {
     final appDir = await getApplicationDocumentsDirectory();
     final modelsDir = Directory('${appDir.path}/models');
@@ -125,9 +135,10 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
     return '${modelsDir.path}/${ModelInfo.nllbModelDirName}';
   }
 
-  Future<String> getWhisperModelPath() async {
+  /// 获取 SenseVoice 模型目录路径
+  Future<String> getSenseVoiceModelDir() async {
     final modelsDir = await _getModelsDirectory();
-    return '${modelsDir.path}/${ModelInfo.whisperModelDirName}/${ModelInfo.whisperModelFileName}';
+    return '${modelsDir.path}/${ModelInfo.senseVoiceModelDirName}';
   }
 
   bool isModelReady() => state.allModelsReady;
@@ -144,8 +155,8 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
     try {
       if (modelInfo.modelType == ModelInfo.nllbModelType) {
         await _downloadNllbModel(modelInfo);
-      } else if (modelInfo.modelType == ModelInfo.whisperModelType) {
-        await _downloadWhisperModel(modelInfo);
+      } else if (modelInfo.modelType == ModelInfo.senseVoiceModelType) {
+        await _downloadSenseVoiceModel(modelInfo);
       } else {
         await _downloadSingleFile(modelInfo);
       }
@@ -187,38 +198,51 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
     }
   }
 
-  Future<void> _downloadWhisperModel(ModelInfo modelInfo) async {
+  /// 下载 SenseVoice 多文件模型
+  Future<void> _downloadSenseVoiceModel(ModelInfo modelInfo) async {
     final modelsDir = await _getModelsDirectory();
-    final whisperDir =
-        Directory('${modelsDir.path}/${ModelInfo.whisperModelDirName}');
-    if (!await whisperDir.exists()) {
-      await whisperDir.create(recursive: true);
+    final svDir =
+        Directory('${modelsDir.path}/${ModelInfo.senseVoiceModelDirName}');
+    if (!await svDir.exists()) {
+      await svDir.create(recursive: true);
     }
 
-    final savePath = '${whisperDir.path}/${modelInfo.fileName}';
+    final files = ModelInfo.senseVoiceModelFiles;
+    final totalSize = files.fold<double>(0, (s, f) => s + f.sizeInMB);
+    double downloadedSize = 0;
 
-    if (File(savePath).existsSync()) {
-      if (mounted) {
-        _updateModelState(modelInfo.fileName,
-            isDownloaded: true, progress: 1.0);
-        state =
-            state.copyWith(isDownloading: false, downloadingModelName: null);
-      }
-      return;
-    }
+    for (int i = 0; i < files.length; i++) {
+      final fileInfo = files[i];
+      final savePath = '${svDir.path}/${fileInfo.name}';
 
-    debugPrint('[ModelManager] 下载 Whisper: ${modelInfo.fileName}');
-
-    await _dio.download(
-      modelInfo.url,
-      savePath,
-      cancelToken: _cancelToken,
-      onReceiveProgress: (received, total) {
-        if (total > 0 && mounted) {
-          _updateModelProgress(modelInfo.fileName, received / total);
+      if (File(savePath).existsSync()) {
+        downloadedSize += fileInfo.sizeInMB;
+        if (mounted) {
+          _updateModelProgress(modelInfo.fileName, downloadedSize / totalSize);
         }
-      },
-    );
+        continue;
+      }
+
+      debugPrint(
+          '[ModelManager] 下载 SenseVoice ${i + 1}/${files.length}: ${fileInfo.name}');
+
+      final baseDownloaded = downloadedSize;
+      await _dio.download(
+        fileInfo.url,
+        savePath,
+        cancelToken: _cancelToken,
+        onReceiveProgress: (received, total) {
+          if (total > 0 && mounted) {
+            final fileProgress = received / total;
+            final overallProgress =
+                (baseDownloaded + fileInfo.sizeInMB * fileProgress) / totalSize;
+            _updateModelProgress(modelInfo.fileName, overallProgress);
+          }
+        },
+      );
+
+      downloadedSize += fileInfo.sizeInMB;
+    }
 
     if (mounted) {
       _updateModelState(modelInfo.fileName,
@@ -306,14 +330,15 @@ class ModelManagerNotifier extends StateNotifier<ModelManagerState> {
     }
   }
 
-  Future<void> downloadWhisperIfNeeded() async {
+  /// 下载 SenseVoice ASR 模型（如未下载）
+  Future<void> downloadSenseVoiceIfNeeded() async {
     await ensureInitialized();
-    final whisperModel = state.models.firstWhere(
-      (m) => m.modelType == ModelInfo.whisperModelType,
+    final svModel = state.models.firstWhere(
+      (m) => m.modelType == ModelInfo.senseVoiceModelType,
       orElse: () => ModelInfo.requiredModels.first,
     );
-    if (!whisperModel.isDownloaded) {
-      await downloadModel(whisperModel);
+    if (!svModel.isDownloaded) {
+      await downloadModel(svModel);
     }
   }
 

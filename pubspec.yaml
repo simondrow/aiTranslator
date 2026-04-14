@@ -1,5 +1,5 @@
 name: ai_translator
-description: Real-time conversation translation app - offline with whisper.cpp + NLLB-200 + fastText
+description: Real-time conversation translation app - offline with SenseVoice + NLLB-200 + fastText
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -22,6 +22,7 @@ dependencies:
   ffi: ^2.1.0
   onnxruntime: ^1.4.1
   permission_handler: ^11.3.0
+  sherpa_onnx: ^1.12.36
 
 dev_dependencies:
   flutter_test:

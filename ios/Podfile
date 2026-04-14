@@ -35,8 +35,7 @@ target 'Runner' do
   # NLLB CTranslate2 翻译原生库 (当前 stub 模式)
   pod 'AiNllb', :path => '../native'
 
-  # Whisper ASR 语音识别原生库
-  pod 'AiWhisper', :path => '../native'
+  # ASR: 使用 sherpa_onnx Flutter 包 (SenseVoice)，无需自定义 native pod
 end
 
 post_install do |installer|
@@ -49,7 +48,7 @@ post_install do |installer|
 
   # Replace "-framework AiFasttext" / "-framework AiNllb" with "-force_load ..."
   # in Pods-Runner xcconfigs so that C symbols survive dead-stripping for DynamicLibrary.process()
-  native_pods = ['AiFasttext', 'AiNllb', 'AiWhisper']
+  native_pods = ['AiFasttext', 'AiNllb']
   Dir.glob(File.join(installer.sandbox.root, 'Target Support Files', 'Pods-Runner', '*.xcconfig')).each do |xcconfig_path|
     content = File.read(xcconfig_path)
     modified = false

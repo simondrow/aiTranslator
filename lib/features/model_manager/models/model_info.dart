@@ -70,8 +70,35 @@ class ModelInfo {
       nllbModelFiles.fold(0, (sum, f) => sum + f.sizeInMB);
 
   // =============================================================
-  // Whisper 语音识别模型
-  // 来源: HuggingFace ggerganov/whisper.cpp
+  // SenseVoice 语音识别模型 (替代 Whisper)
+  // 来源: sherpa-onnx 预转换模型
+  // Non-autoregressive，推理速度极快（<1s per segment on mobile）
+  // 支持: 中文、英文、日文、韩文、粤语
+  // =============================================================
+  static const String senseVoiceModelType = 'sensevoice';
+  static const String senseVoiceModelDirName = 'sensevoice';
+
+  /// SenseVoice 模型需要下载的文件
+  static List<SenseVoiceModelFile> get senseVoiceModelFiles => const [
+        SenseVoiceModelFile(
+          name: 'model.int8.onnx',
+          url: 'https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx',
+          sizeInMB: 228,
+        ),
+        SenseVoiceModelFile(
+          name: 'tokens.txt',
+          url: 'https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt',
+          sizeInMB: 1,
+        ),
+      ];
+
+  /// SenseVoice 模型总大小 (MB)
+  static double get senseVoiceTotalSizeMB =>
+      senseVoiceModelFiles.fold(0.0, (sum, f) => sum + f.sizeInMB);
+
+  // =============================================================
+  // [DEPRECATED] Whisper 语音识别模型 — 已被 SenseVoice 替代
+  // 保留常量以兼容迁移
   // =============================================================
   static const String whisperModelType = 'whisper';
   static const String whisperModelDirName = 'whisper';
@@ -80,16 +107,15 @@ class ModelInfo {
   /// 需要下载的模型列表
   /// 注意: fastText lid.176.ftz (917KB) 已打包在 assets 中，无需下载
   static List<ModelInfo> get requiredModels => [
-        const ModelInfo(
-          name: 'Whisper Base (multilingual)',
-          url:
-              'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin',
-          fileName: whisperModelFileName,
-          sizeInMB: 148,
-          modelType: whisperModelType,
+        ModelInfo(
+          name: 'SenseVoice (语音识别)',
+          url: '', // 多文件下载，url 在 senseVoiceModelFiles 中
+          fileName: senseVoiceModelDirName,
+          sizeInMB: senseVoiceTotalSizeMB,
+          modelType: senseVoiceModelType,
         ),
         ModelInfo(
-          name: 'NLLB-200 ONNX (quantized)',
+          name: 'NLLB-200 ONNX (翻译)',
           url: '', // 多文件下载，url 在 nllbModelFiles 中
           fileName: nllbModelDirName,
           sizeInMB: nllbTotalSizeMB,
@@ -105,6 +131,19 @@ class NllbModelFile {
   final double sizeInMB;
 
   const NllbModelFile({
+    required this.name,
+    required this.url,
+    required this.sizeInMB,
+  });
+}
+
+/// SenseVoice 模型单个文件信息
+class SenseVoiceModelFile {
+  final String name;
+  final String url;
+  final double sizeInMB;
+
+  const SenseVoiceModelFile({
     required this.name,
     required this.url,
     required this.sizeInMB,

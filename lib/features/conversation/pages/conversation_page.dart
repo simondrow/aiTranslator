@@ -60,7 +60,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     _textController.addListener(_onTextChanged);
     _textFocusNode.addListener(_onFocusChanged);
     // 启动后自动下载 whisper 模型（如尚未下载）
-    Future.microtask(() => _ensureWhisperDownloaded());
+    Future.microtask(() => _ensureAsrDownloaded());
 
     // 录音脉冲动画
     _pulseController = AnimationController(
@@ -72,13 +72,13 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     );
   }
 
-  Future<void> _ensureWhisperDownloaded() async {
+  Future<void> _ensureAsrDownloaded() async {
     await Future.delayed(const Duration(seconds: 1));
     if (!mounted) return;
     final modelState = ref.read(modelManagerProvider);
-    if (!modelState.isWhisperReady && !modelState.isDownloading) {
-      debugPrint('[ConversationPage] 自动触发 whisper 模型下载');
-      ref.read(modelManagerProvider.notifier).downloadWhisperIfNeeded();
+    if (!modelState.isSenseVoiceReady && !modelState.isDownloading) {
+      debugPrint('[ConversationPage] 自动触发 SenseVoice 模型下载');
+      ref.read(modelManagerProvider.notifier).downloadSenseVoiceIfNeeded();
     }
   }
 
@@ -247,10 +247,10 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
 
     await _ensureModelReady();
 
-    // 确保 whisper 模型后台下载
+    // 确保 SenseVoice 模型后台下载
     final modelState = ref.read(modelManagerProvider);
-    if (!modelState.isWhisperReady && !modelState.isDownloading) {
-      ref.read(modelManagerProvider.notifier).downloadWhisperIfNeeded();
+    if (!modelState.isSenseVoiceReady && !modelState.isDownloading) {
+      ref.read(modelManagerProvider.notifier).downloadSenseVoiceIfNeeded();
     }
 
     try {

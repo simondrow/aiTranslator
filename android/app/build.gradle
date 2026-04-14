@@ -37,16 +37,11 @@ android {
 
         externalNativeBuild {
             cmake {
-                arguments '-DAI_BUILD_WHISPER=ON',
+                // Whisper removed — ASR now uses SenseVoice via sherpa_onnx package
+                arguments '-DAI_BUILD_WHISPER=OFF',
                           '-DAI_BUILD_NLLB=ON',
                           '-DAI_BUILD_FASTTEXT=ON',
-                          '-DGGML_ACCELERATE=OFF',
-                          '-DGGML_METAL=OFF',
-                          '-DGGML_BLAS=OFF',
-                          '-DBUILD_SHARED_LIBS=ON',
-                          '-DWHISPER_BUILD_TESTS=OFF',
-                          '-DWHISPER_BUILD_EXAMPLES=OFF',
-                          '-DWHISPER_BUILD_SERVER=OFF'
+                          '-DBUILD_SHARED_LIBS=ON'
                 cppFlags '-O3 -funroll-loops'
             }
         }
