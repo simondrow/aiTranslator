@@ -81,13 +81,13 @@ dependencies {}
 // which lacks the OrtGetApiBase symbol needed by sherpa-onnx-c-api.so.
 // sherpa_onnx_android ships a newer 19MB version that is backward-compatible.
 //
-// We strip the jniLibs from the onnxruntime subproject so only sherpa_onnx's
-// copy survives the merge.
+// gradle.projectsEvaluated runs after ALL sub-projects are fully configured,
+// so the :onnxruntime project's android plugin is guaranteed to be applied.
 // ============================================================
-project.afterEvaluate {
+gradle.projectsEvaluated {
     def onnxProj = rootProject.findProject(':onnxruntime')
     if (onnxProj != null) {
         onnxProj.android.sourceSets.main.jniLibs.srcDirs = []
-        println "[AITranslator] Cleared onnxruntime jniLibs — using sherpa_onnx's libonnxruntime.so"
+        println "[AITranslator] Cleared onnxruntime jniLibs -- using sherpa_onnx libonnxruntime.so"
     }
 }
