@@ -6,8 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'hymt_translator.dart';
 
 /// 翻译服务
-/// 使用 HY-MT1.5-1.8B (GGUF via llama.cpp) 实现离线翻译。
-/// 推理在 native 层异步执行，不阻塞 UI 线程。
+/// 使用 HY-MT1.5-1.8B (GGUF via llama.cpp) 实现离线翻译。/// 推理在 native 层异步执行，不阻塕 UI 线程。
 /// 模型未加载时使用 stub 返回占位结果。
 class TranslationService {
   HymtTranslator? _translator;
@@ -47,12 +46,12 @@ class TranslationService {
       if (_translator!.isReady) {
         debugPrint('[TranslationService] HY-MT 翻译引擎已就绪');
       } else {
-        debugPrint('[TranslationService] HY-MT 初始化失败，将以 stub 模式运行');
+        debugPrint('[TranslationService] HY-MT 初始化失败，将䷥ stub 模式运行');
         _translator = null;
       }
     } catch (e) {
       debugPrint('[TranslationService] HY-MT 初始化失败: $e');
-      debugPrint('[TranslationService] 将以 stub 模式运行');
+      debugPrint('[TranslationService] 将䷥ stub 模式运行');
       _translator = null;
       _isInitialized = true;
     } finally {
@@ -74,7 +73,7 @@ class TranslationService {
     return null;
   }
 
-  /// 尝试从默认下载目录自动初始化
+  /// 尝试从默认下载夕录自动初始化
   Future<bool> tryAutoInitialize() async {
     if (_isInitialized && isEngineReady) return true;
 
@@ -95,7 +94,7 @@ class TranslationService {
   }
 
   /// 翻译文本
-  /// [fromLang] / [toLang] 使用 ISO 短代码 (zh, en, ja, ko, ...)
+  /// [fromLang] / [toLang] 使用 ISO 短代码 (zh, en, ja, ko)
   /// HY-MT 原生支持短代码，无需转换
   Future<String> translate(
     String text,
@@ -131,14 +130,7 @@ class TranslationService {
       'zh': '中文',
       'en': 'English',
       'ja': '日本語',
-      'ko': '한국어',
-      'fr': 'Français',
-      'de': 'Deutsch',
-      'ru': 'Русский',
-      'es': 'Español',
-      'it': 'Italiano',
-      'th': 'ภาษาไทย',
-      'vi': 'Tiếng Việt',
+      'ko': '한국얬',
     };
     return map[code] ?? code;
   }

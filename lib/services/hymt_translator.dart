@@ -76,7 +76,7 @@ class HymtTranslator {
   }
 
   /// 翻译文本
-  /// [srcLang] / [tgtLang] 使用 ISO 短代码 (zh, en, ja, ko, fr, de, ...)
+  /// [srcLang] / [tgtLang] 使用 ISO 短代码 (zh, en, ja, ko)
   Future<String> translate(String text, String srcLang, String tgtLang) async {
     if (!_isReady || _llama == null) {
       throw StateError('HY-MT 翻译引擎未初始化');
@@ -135,18 +135,6 @@ class HymtTranslator {
       'en': 'English',
       'ja': '日本語',
       'ko': '한국어',
-      'fr': 'French',
-      'de': 'German',
-      'ru': 'Russian',
-      'es': 'Spanish',
-      'it': 'Italian',
-      'th': 'Thai',
-      'vi': 'Vietnamese',
-      'pt': 'Portuguese',
-      'ar': 'Arabic',
-      'tr': 'Turkish',
-      'ms': 'Malay',
-      'id': 'Indonesian',
     };
     return map[code] ?? code;
   }

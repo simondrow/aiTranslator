@@ -39,12 +39,12 @@ class ModelInfo {
     );
   }
 
-  // =============================================================
-  // HY-MT1.5-1.8B GGUF 翻译模型 (替代 NLLB)
+  // ==============================================================
+  // HY-MT1.5-1.8B GGUF 翻译模型
   // 来源: Tencent HunyuanTranslation
-  // Q4_K_M 量化, ~1.13GB, 支持 33 种语言
+  // Q4_K_M 量化, ~1.13GB, 支持中/英/日/韩
   // 通过 llama.cpp (flutter_llama) 推理
-  // =============================================================
+  // ==============================================================
   static const String hymtModelType = 'hymt';
   static const String hymtModelDirName = 'hymt';
   static const String hymtModelFileName = 'HY-MT1.5-1.8B-Q4_K_M.gguf';
@@ -62,12 +62,12 @@ class ModelInfo {
   static double get hymtTotalSizeMB =>
       hymtModelFiles.fold(0.0, (sum, f) => sum + f.sizeInMB);
 
-  // =============================================================
+  // ==============================================================
   // SenseVoice 语音识别模型
   // 来源: sherpa-onnx 预转换模型
   // Non-autoregressive，推理速度极快（<1s per segment on mobile）
   // 支持: 中文、英文、日文、韩文、粤语
-  // =============================================================
+  // ==============================================================
   static const String senseVoiceModelType = 'sensevoice';
   static const String senseVoiceModelDirName = 'sensevoice';
 
@@ -89,24 +89,8 @@ class ModelInfo {
   static double get senseVoiceTotalSizeMB =>
       senseVoiceModelFiles.fold(0.0, (sum, f) => sum + f.sizeInMB);
 
-  // =============================================================
-  // [DEPRECATED] NLLB — 已被 HY-MT1.5 替代
-  // 保留常量以兼容迁移
-  // =============================================================
-  @Deprecated('Use hymtModelType instead')
-  static const String nllbModelType = 'nllb-onnx';
-  @Deprecated('Use hymtModelDirName instead')
-  static const String nllbModelDirName = 'nllb-onnx';
-
-  // =============================================================
-  // [DEPRECATED] Whisper — 已被 SenseVoice 替代
-  // =============================================================
-  static const String whisperModelType = 'whisper';
-  static const String whisperModelDirName = 'whisper';
-  static const String whisperModelFileName = 'ggml-base.bin';
-
   /// 需要下载的模型列表
-  /// 注意: fastText lid.176.ftz (917KB) 已打包在 assets 中，无需下载
+  /// 注意: fastText lid.176.ftz (917KB) 已打包在 assets 中，无霁下载
   static List<ModelInfo> get requiredModels => [
         ModelInfo(
           name: 'SenseVoice (语音识别)',
