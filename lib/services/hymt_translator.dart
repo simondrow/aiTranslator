@@ -29,10 +29,10 @@ class HymtTranslator {
       final config = LlamaConfig(
         modelPath: ggufPath,
         nThreads: 4,
-        nGpuLayers: -1, // All layers on GPU (Metal/Vulkan)
+        nGpuLayers: 0, // CPU only (Vulkan disabled for cross-compilation)
         contextSize: 1024, // Translation needs short context
         batchSize: 512,
-        useGpu: true,
+        useGpu: false, // CPU + ARM NEON
         verbose: false,
       );
 
