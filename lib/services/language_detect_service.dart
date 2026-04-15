@@ -24,7 +24,8 @@ class LanguageDetectService {
   FastTextBindings? _bindings;
   bool _isInitialized = false;
 
-  /// 置信度阈值: 低于此值则认为检测不可靠
+  /// 置信度阈值: 低于此值则认为 fastText 检测不可靠，
+  /// 回退到基于 Unicode 的启发式检测。
   static const double confidenceThreshold = 0.5;
 
   /// 资产中的模型路径
@@ -70,9 +71,14 @@ class LanguageDetectService {
   ///
   /// [text] 待检测的文本
   /// 返回 [LanguageDetectResult] 包含语种代码和置信度
+  ///
+  /// 策略:
+  ///   1. fastText 检测；若置信度 >= [confidenceThreshold] 直接采纳。
+  ///   2. 置信度不足时，回退到 Unicode 启发式 [_fallbackDetect]。
+  ///      短文本（< 10 字符）或含大量非 ASCII 字符的文本中
+  ///      fastText 经常误判为 en，此分支可有效纠正。
   LanguageDetectResult detectLanguage(String text) {
     if (!_isInitialized || _bindings == null) {
-      // 未初始化时使用简单启发式: 判断是否包含 CJK 字符
       return _fallbackDetect(text);
     }
 
@@ -84,58 +90,96 @@ class LanguageDetectService {
     }
 
     try {
-      // FFI 调用在主 isolate 中执行（fastText predict 非常快，< 1ms）
       final result = _bindings!.predict(text);
 
-      // fastText 输出格式为 "__label__xx"，提取语种代码
       String langCode = result.label;
       if (langCode.startsWith('__label__')) {
         langCode = langCode.replaceFirst('__label__', '');
       }
 
-      final detectResult = LanguageDetectResult(
-        languageCode: langCode,
-        confidence: result.confidence,
-      );
+      final confidence = result.confidence;
 
-      if (detectResult.confidence < confidenceThreshold) {
+      // 置信度不足 → 回退启发式
+      if (confidence < confidenceThreshold) {
         debugPrint(
-          '[LanguageDetectService] 低置信度检测: '
-          '${detectResult.languageCode} (${detectResult.confidence})',
+          '[LanguageDetectService] 低置信度 fastText: '
+          '$langCode ($confidence), 回退启发式',
         );
+        final fallback = _fallbackDetect(text);
+        debugPrint(
+          '[LanguageDetectService] 启发式结果: '
+          '${fallback.languageCode} (${fallback.confidence})',
+        );
+        return fallback;
       }
 
-      return detectResult;
+      return LanguageDetectResult(
+        languageCode: langCode,
+        confidence: confidence,
+      );
     } catch (e) {
       debugPrint('[LanguageDetectService] 语种检测失败: $e');
       return _fallbackDetect(text);
     }
   }
 
-  /// 简单的后备语种检测（当 FFI 不可用时）
+  /// 基于 Unicode 码欵的后备语种检测
+  ///
+  /// 统计文本中各文字系统占比，选择占比最高的语种。
+  /// 对短文本（几个汉字/假名/谚文）极其可靠。
   LanguageDetectResult _fallbackDetect(String text) {
     final trimmed = text.trim();
     if (trimmed.isEmpty) {
       return const LanguageDetectResult(languageCode: 'und', confidence: 0.0);
     }
 
-    // 检查是否包含 CJK 字符
-    final cjkRegex = RegExp(r'[\u4e00-\u9fff\u3400-\u4dbf]');
-    final japRegex = RegExp(r'[\u3040-\u309f\u30a0-\u30ff]');
-    final korRegex = RegExp(r'[\uac00-\ud7af\u1100-\u11ff]');
-    final cyrRegex = RegExp(r'[\u0400-\u04ff]');
+    int cjkCount = 0; // 汉字 (CJK Unified + Ext-A)
+    int hiraCount = 0; // 平假名
+    int kataCount = 0; // 片假名
+    int korCount = 0; // 谚文音节 + 字母
+    int latinCount = 0; // 基础拉丁字母
 
-    if (japRegex.hasMatch(trimmed)) {
-      return const LanguageDetectResult(languageCode: 'ja', confidence: 0.7);
+    for (final rune in trimmed.runes) {
+      if ((rune >= 0x4E00 && rune <= 0x9FFF) ||
+          (rune >= 0x3400 && rune <= 0x4DBF)) {
+        cjkCount++;
+      } else if (rune >= 0x3040 && rune <= 0x309F) {
+        hiraCount++;
+      } else if (rune >= 0x30A0 && rune <= 0x30FF) {
+        kataCount++;
+      } else if ((rune >= 0xAC00 && rune <= 0xD7AF) ||
+          (rune >= 0x1100 && rune <= 0x11FF)) {
+        korCount++;
+      } else if ((rune >= 0x0041 && rune <= 0x005A) ||
+          (rune >= 0x0061 && rune <= 0x007A)) {
+        latinCount++;
+      }
     }
-    if (korRegex.hasMatch(trimmed)) {
-      return const LanguageDetectResult(languageCode: 'ko', confidence: 0.7);
+
+    final japCount = hiraCount + kataCount;
+    final total = cjkCount + japCount + korCount + latinCount;
+    if (total == 0) {
+      return const LanguageDetectResult(languageCode: 'en', confidence: 0.3);
     }
-    if (cjkRegex.hasMatch(trimmed)) {
-      return const LanguageDetectResult(languageCode: 'zh', confidence: 0.7);
+
+    // 日文特征字符（平/片假名）优先判定
+    if (japCount > 0) {
+      return LanguageDetectResult(
+        languageCode: 'ja',
+        confidence: (japCount + cjkCount) / total.clamp(1, total).toDouble(),
+      );
     }
-    if (cyrRegex.hasMatch(trimmed)) {
-      return const LanguageDetectResult(languageCode: 'ru', confidence: 0.6);
+    if (korCount > 0) {
+      return LanguageDetectResult(
+        languageCode: 'ko',
+        confidence: korCount / total.clamp(1, total).toDouble(),
+      );
+    }
+    if (cjkCount > 0) {
+      return LanguageDetectResult(
+        languageCode: 'zh',
+        confidence: cjkCount / total.clamp(1, total).toDouble(),
+      );
     }
 
     // 默认英文
