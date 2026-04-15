@@ -46,12 +46,29 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
 
-  /// 防抖定时器
+  /// 防抖定时器 (文本输入场景)
   Timer? _debounceTimer;
   static const _debounceDuration = Duration(milliseconds: 400);
 
   /// 上一次的文本内容（用于判断文本是否真正变化，忽略光标移动）
   String _previousText = '';
+
+  // ============================================================
+  // 语音翻译节奏控制
+  // ============================================================
+
+  /// 上次触发语音翻译时的源文本快照
+  /// 新 ASR 段到达后，对比当前完整文本与此快照，
+  /// 只有 **有效字符增量** 达到阈值才触发新一轮翻译。
+  String _lastVoiceTranslateSnapshot = '';
+
+  /// 有效字符增量阈值 — 新增多少个有意义字符后才触发翻译
+  /// CJK 2 字 ≈ 一个短词；Latin 4 字母 ≈ 一个单词
+  static const _voiceTranslateMinDelta = 2;
+
+  /// 录音期间是否有翻译正在进行/已完成
+  /// 用于停止录音时判断：如果已有翻译且最终文本无增量，直接 commit
+  bool _hasVoiceTranslation = false;
 
   @override
   void initState() {
@@ -130,6 +147,10 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     if (text == _previousText) return;
     _previousText = text;
 
+    // 录音期间由 _transcribeSegment 直接驱动翻译，
+    // 不走 _onTextChanged → debounce 路径，避免双重触发
+    if (_isRecording) return;
+
     if (text.isEmpty) {
       _debounceTimer?.cancel();
       ref.read(conversationProvider.notifier).cancelAndClear();
@@ -199,6 +220,8 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
       _isStopping = false;
       _stopRequested = false;
       _streamingAsrText = '';
+      _lastVoiceTranslateSnapshot = '';
+      _hasVoiceTranslation = false;
       _firstInteraction = true; // 允许下次交互重新触发模型下载检查
     });
   }
@@ -244,6 +267,8 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     _segmentTimer?.cancel();
     _isTranscribing = false;
     _streamingAsrText = '';
+    _lastVoiceTranslateSnapshot = '';
+    _hasVoiceTranslation = false;
 
     await _ensureModelReady();
 
@@ -301,48 +326,63 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     _pulseController.stop();
     _pulseController.reset();
 
-    // 取消进行中的翻译（debounce 触发的）
+    // 取消进行中的翻译 debounce（文本输入的，不影响语音翻译的 LLM 任务）
     _debounceTimer?.cancel();
-    ref.read(conversationProvider.notifier).cancelTranslation();
 
     setState(() => _isRecording = false);
 
     try {
-      // 停止录音并处理最后一段（正在进行的非final ASR会被 _stopRequested 过滤）
+      // 停止录音并处理最后一段
       debugPrint('[ConversationPage] 语音停止: 处理最后一段音频');
       final path = await _audioService.stopRecording();
       if (path.isNotEmpty) {
         await _transcribeSegment(path, isFinal: true);
       }
 
-      // 最终文本 — 使用统一的噪音过滤
+      // 最终文本
       final finalText = ConversationNotifier.cleanAsrText(_streamingAsrText);
-      if (finalText.isNotEmpty) {
-        final notifier = ref.read(conversationProvider.notifier);
-        final currentState = ref.read(conversationProvider);
+      if (finalText.isEmpty) {
+        debugPrint('[ConversationPage] 录音结束但无识别结果');
+        return;
+      }
 
-        if (currentState.realtimeTranslation.isNotEmpty) {
-          // 已有实时翻译结果，直接 commit，不重新翻译
-          debugPrint('[ConversationPage] 语音结束: 复用已有翻译结果');
-          notifier.commitTranslation(finalText);
+      final notifier = ref.read(conversationProvider.notifier);
+      final currentState = ref.read(conversationProvider);
+
+      // 判断最终文本相比上次翻译是否有增量
+      final finalMeaningful =
+          ConversationNotifier.countMeaningfulChars(finalText);
+      final snapshotMeaningful =
+          ConversationNotifier.countMeaningfulChars(_lastVoiceTranslateSnapshot);
+      final delta = finalMeaningful - snapshotMeaningful;
+
+      if (_hasVoiceTranslation &&
+          currentState.realtimeTranslation.isNotEmpty &&
+          delta < _voiceTranslateMinDelta) {
+        // 已有翻译结果且最终文本无有意义增量，直接 commit
+        debugPrint(
+          '[ConversationPage] 语音结束: 无增量 (delta=$delta), 复用已有翻译',
+        );
+        notifier.commitTranslation(finalText);
+        setState(() {
+          _textController.text = finalText;
+          _isCompleted = true;
+        });
+      } else {
+        // 有增量或无已有翻译，触发最终翻译
+        debugPrint(
+          '[ConversationPage] 语音结束: 有增量 (delta=$delta), 执行最终翻译',
+        );
+        // 取消可能正在进行的旧翻译，用最终全文做翻译
+        notifier.cancelTranslation();
+        await notifier.sendTextMessage(finalText);
+        final newState = ref.read(conversationProvider);
+        if (newState.messages.isNotEmpty) {
           setState(() {
-            _textController.text = finalText;
+            _textController.text = newState.messages.last.originalText;
             _isCompleted = true;
           });
-        } else {
-          // 没有翻译结果（可能 debounce 还没触发），做一次翻译
-          debugPrint('[ConversationPage] 语音结束: 无已有翻译，执行最终翻译');
-          await notifier.sendTextMessage(finalText);
-          final newState = ref.read(conversationProvider);
-          if (newState.messages.isNotEmpty) {
-            setState(() {
-              _textController.text = newState.messages.last.originalText;
-              _isCompleted = true;
-            });
-          }
         }
-      } else {
-        debugPrint('[ConversationPage] 录音结束但无识别结果');
       }
     } catch (e) {
       debugPrint('[ConversationPage] Stop recording failed: $e');
@@ -370,6 +410,14 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
   }
 
   /// 转写一段音频并更新 UI
+  ///
+  /// 语音翻译节奏策略:
+  ///   1. ASR 识别完成后，先清理噪音标记
+  ///   2. 检查有效字符数（< 1 则丢弃，视为纯噪音）
+  ///   3. 追加到 _streamingAsrText，更新输入框
+  ///   4. 与上次翻译快照对比有效字符增量:
+  ///      增量 >= [_voiceTranslateMinDelta] 且 LLM 空闲 → 触发翻译
+  ///      增量不够 或 LLM 忙 → 跳过 (LLM 完成后会从 pending queue 拿最新文本)
   Future<void> _transcribeSegment(String audioPath,
       {bool isFinal = false}) async {
     _isTranscribing = true;
@@ -385,31 +433,45 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
       final notifier = ref.read(conversationProvider.notifier);
       final asrResult = await notifier.transcribeAudio(audioPath);
 
-      // ASR 完成后检查：录音会话是否已过期（录音已停止/重置/新录音开始）
+      // ASR 完成后检查：录音会话是否已过期
       if (myGen != _recordingGeneration) {
         debugPrint('[ConversationPage] ASR 结果丢弃 (录音会话已过期 gen=$myGen, 当前=$_recordingGeneration): "$asrResult"');
         return;
       }
 
-      // 过滤 [BLANK_AUDIO], [music], [cow mooing] 等无效标记
+      // 清理噪音标记
       final cleanResult = ConversationNotifier.cleanAsrText(asrResult);
+
+      // 有效字符过少 → 纯噪音段，丢弃
+      final meaningfulCount =
+          ConversationNotifier.countMeaningfulChars(cleanResult);
+      if (meaningfulCount < 1) {
+        debugPrint(
+          '[ConversationPage] ASR 段丢弃 (有效字符=$meaningfulCount): "$cleanResult"',
+        );
+        return;
+      }
 
       if (cleanResult.isNotEmpty) {
         _streamingAsrText +=
             (_streamingAsrText.isEmpty ? '' : ' ') + cleanResult;
 
         if (mounted) {
-          // 先更新 _previousText 再设 controller，
-          // 让 _onTextChanged 感知到内容变化并走 debounce 翻译，不会重复
           final newText = _streamingAsrText;
-          _previousText = ''; // 强制 _onTextChanged 识别为内容变化
+          _previousText = newText; // 同步 _previousText，防止 _onTextChanged 重入
           setState(() {
             _textController.text = newText;
             _textController.selection = TextSelection.fromPosition(
               TextPosition(offset: _textController.text.length),
             );
           });
-          // 翻译完全由 _onTextChanged 的 debounce 统一触发，不再手动调用
+
+          // ---- 语音翻译节奏控制 ----
+          // 只有在非 isFinal 段时才在录音期间触发翻译
+          // isFinal 段由 _stopVoiceRecording 统一处理
+          if (!isFinal && !_stopRequested) {
+            _maybeTranslateVoice(newText);
+          }
         }
       }
     } catch (e) {
@@ -417,6 +479,37 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     } finally {
       _isTranscribing = false;
     }
+  }
+
+  /// 语音录音期间的翻译节奏控制
+  ///
+  /// 对比当前全文与上次翻译快照的有效字符增量，
+  /// 增量足够大且 LLM 空闲时才触发翻译。
+  void _maybeTranslateVoice(String currentFullText) {
+    final notifier = ref.read(conversationProvider.notifier);
+
+    final currentMeaningful =
+        ConversationNotifier.countMeaningfulChars(currentFullText);
+    final snapshotMeaningful =
+        ConversationNotifier.countMeaningfulChars(_lastVoiceTranslateSnapshot);
+    final delta = currentMeaningful - snapshotMeaningful;
+
+    if (delta < _voiceTranslateMinDelta) {
+      debugPrint(
+        '[ConversationPage] 语音翻译跳过: 增量不足 (delta=$delta < $_voiceTranslateMinDelta)',
+      );
+      return;
+    }
+
+    // 记录快照（即使 LLM 忙也更新，避免下次段又重复判断增量）
+    _lastVoiceTranslateSnapshot = currentFullText;
+    _hasVoiceTranslation = true;
+
+    // 通过 translateForVoice 调度 (无 debounce，LLM 忙时自动暂存)
+    debugPrint(
+      '[ConversationPage] 语音翻译触发: delta=$delta, 文本长度=${currentFullText.length}',
+    );
+    notifier.translateForVoice(currentFullText);
   }
 
   void _toggleVoiceRecording() {
@@ -675,7 +768,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
 
       // 翻译中 / 译文
       if (state.isDetecting || state.isTranslating)
-        const _ProcessingIndicator()
+        _buildTranslatingIndicator(state)
       else if (state.realtimeTranslation.isNotEmpty)
         Text(
           state.realtimeTranslation,
@@ -702,6 +795,43 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
         ),
       ],
     ];
+  }
+
+  /// 翻译中指示器 — 如果有上一次译文则同时显示，否则只显示 spinner
+  Widget _buildTranslatingIndicator(ConversationState state) {
+    if (state.realtimeTranslation.isNotEmpty) {
+      // 有上一次译文 → 显示译文 + 小 spinner
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            state.realtimeTranslation,
+            style: TextStyle(
+              fontSize: 28,
+              fontWeight: FontWeight.w500,
+              color: AppTheme.targetTextColor.withValues(alpha: 0.7),
+              height: 1.3,
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Row(
+            children: [
+              SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 1.5),
+              ),
+              SizedBox(width: 8),
+              Text(
+                '更新中...',
+                style: TextStyle(fontSize: 14, color: AppTheme.textSecondary),
+              ),
+            ],
+          ),
+        ],
+      );
+    }
+    return const _ProcessingIndicator();
   }
 
   /// 底部区域: 语言栏 + 麦克风/停止按钮

@@ -75,16 +75,18 @@ class ConversationState {
 /// 翻译调度策略 (解决连续输入场景下的浪费问题):
 ///
 ///   1. **Debounce** — 文本变更后等待一段时间再触发翻译。
-///      UI 层 [ConversationPage] 有 400ms debounce；
-///      本类 [detectAndTranslate] 内部再做一次 _translateDebounce
-///      (默认 600ms) 防止短时间内连续调用实际发起翻译。
+///      文本输入场景: UI 层 400ms debounce + 本类 600ms debounce ≈ 1s
+///      语音输入场景: Page 层控制翻译时机 (有意义增量时直接调用)
 ///
 ///   2. **Generation** — 每次新翻译请求递增 [_translateGeneration]，
 ///      完成时检查：若 generation 已过期说明有更新的请求，丢弃结果。
 ///
 ///   3. **文本去重** — 与上次提交翻译的原文比较，完全相同则跳过。
 ///
-///   4. **保留上次结果** — 新翻译进行中时，UI 继续显示上一次的译文
+///   4. **LLM 忙队列** — 当 LLM 正在推理时，新请求暂存到 [_pendingText]，
+///      推理完成后 [_drainPending] 自动拾取最新文本继续翻译。
+///
+///   5. **保留上次结果** — 新翻译进行中时，UI 继续显示上一次的译文
 ///      (state.realtimeTranslation 不清空)，避免翻译中画面闪烁。
 class ConversationNotifier extends StateNotifier<ConversationState> {
   final AsrService _asrService;
@@ -100,19 +102,16 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   /// 已锁定的翻译方向（源 → 目标）
   ({String source, String target})? _lockedDirection;
 
-  /// 翻译 debounce 定时器
-  /// 当连续调用 detectAndTranslate 时，只有最后一次会真正启动翻译。
+  /// 翻译 debounce 定时器 (仅文本输入场景使用)
   Timer? _translateDebounce;
 
   /// 翻译 debounce 时长。
-  /// 语音场景下每 3 秒来一段 ASR，400ms UI debounce + 600ms 翻译 debounce
-  /// ≈ 1 秒后触发翻译，留出足够的文本稳定窗口。
   static const _translateDebounceDuration = Duration(milliseconds: 600);
 
   /// 当前是否有翻译任务正在 LLM 推理中
   bool _isLlmBusy = false;
 
-  /// debounce 期间积压的最新文本（在 LLM 忙时也暂存）
+  /// LLM 忙时积压的最新文本
   String? _pendingText;
 
   ConversationNotifier({
@@ -159,6 +158,9 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
   /// ASR 引擎是否就绪
   bool get isAsrReady => _asrService.isInitialized;
+
+  /// LLM 当前是否正在推理
+  bool get isLlmBusy => _isLlmBusy;
 
   /// 手动初始化翻译引擎 (模型下载完成后调用)
   Future<void> initTranslationEngine(String modelDir) async {
@@ -227,7 +229,7 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   // 实时翻译调度 (debounce + generation + queue)
   // ============================================================
 
-  /// 实时语种检测 + 翻译
+  /// 实时语种检测 + 翻译 (文本输入场景，带 debounce)
   ///
   /// 调度策略:
   ///   - 内部 debounce [_translateDebounceDuration]，连续快速调用只保留最后一次。
@@ -274,7 +276,36 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     });
   }
 
-  /// 实际执行翻译 (debounce 后 / pending 恢复时调用)
+  /// 语音场景: 直接请求翻译 (无 debounce，由 Page 层控制调用时机)
+  ///
+  /// 与 [detectAndTranslate] 的区别：
+  ///   - 不做 debounce (Page 层已经控制了翻译节奏)
+  ///   - LLM 忙时同样暂存，不丢弃
+  void translateForVoice(String fullText) {
+    final cleanText = cleanAsrText(fullText);
+    if (cleanText.isEmpty) return;
+
+    // 去重
+    if (cleanText == _lastTranslatingText &&
+        state.realtimeTranslation.isNotEmpty &&
+        !_isLlmBusy) {
+      return;
+    }
+
+    if (_isLlmBusy) {
+      _pendingText = cleanText;
+      _translateGeneration++;
+      debugPrint(
+        '[ConversationNotifier] [语音] LLM 忙, 暂存: '
+        '"${cleanText.length > 30 ? '${cleanText.substring(0, 30)}...' : cleanText}"',
+      );
+      return;
+    }
+
+    _executeTranslation(cleanText);
+  }
+
+  /// 实际执行翻译 (debounce 后 / pending 恢复 / 语音直接调用)
   Future<void> _executeTranslation(String cleanText) async {
     // 再次去重
     if (cleanText == _lastTranslatingText &&
@@ -582,10 +613,13 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   }
 
   /// 过滤 ASR 输出中的非语音标记
-  /// [BLANK_AUDIO], [music], [Music], [cow mooing], (music), etc.
+  /// [BLANK_AUDIO], [music], [Music], [cow mooing], (music), <|nospeech|> etc.
   static final _noiseTokenPattern = RegExp(
-    r'\[(?:BLANK_AUDIO|blank_audio|music|Music|MUSIC|cow mooing|laughter|applause|noise|silence)\]'
-    r'|\((?:music|Music|laughter|applause)\)',
+    r'\[(?:BLANK_AUDIO|blank_audio|music|Music|MUSIC|cow mooing|laughter|applause|noise|silence|Silence|NOISE)\]'
+    r'|\((?:music|Music|laughter|applause|noise)\)'
+    r'|<\|(?:nospeech|NOSPEECH|blank)\|>'
+    r'|♪+'
+    r'|\.{4,}',
     caseSensitive: false,
   );
 
@@ -595,6 +629,24 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         .replaceAll(_noiseTokenPattern, '')
         .replaceAll(RegExp(r'\s{2,}'), ' ')
         .trim();
+  }
+
+  /// 统计文本中的有效字符数（字母、CJK、假名、韩文），
+  /// 用于判断 ASR 输出是否包含有意义的语音内容。
+  static int countMeaningfulChars(String text) {
+    int count = 0;
+    for (final rune in text.runes) {
+      if ((rune >= 0x4E00 && rune <= 0x9FFF) ||
+          (rune >= 0x3400 && rune <= 0x4DBF) ||
+          (rune >= 0x3040 && rune <= 0x309F) ||
+          (rune >= 0x30A0 && rune <= 0x30FF) ||
+          (rune >= 0xAC00 && rune <= 0xD7AF) ||
+          (rune >= 0x0041 && rune <= 0x005A) ||
+          (rune >= 0x0061 && rune <= 0x007A)) {
+        count++;
+      }
+    }
+    return count;
   }
 }
 
