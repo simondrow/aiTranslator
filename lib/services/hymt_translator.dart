@@ -80,14 +80,17 @@ class HymtTranslator {
     }
   }
 
-  /// 构建 HY-MT prompt
+  /// 构建 HY-MT prompt (遵循官方 prompt 模板)
+  ///
+  /// ZH<=>XX: 中文 prompt + 中文语言名称
+  /// XX<=>XX: 英文 prompt + 英文语言名称
   String _buildPrompt(String text, String srcLang, String tgtLang) {
-    final targetName = _langDisplayName(tgtLang);
-
     if (srcLang == 'zh' || tgtLang == 'zh') {
-      return '将以下文本翻译为$targetName，注意只需要输出翻译后的结果，不要额外解释：\n\n$text';
+      final targetNameCn = _langNameChinese(tgtLang);
+      return '将以下文本翻译为$targetNameCn，注意只需要输出翻译后的结果，不要额外解释：\n\n$text';
     } else {
-      return 'Translate the following segment into $targetName, without additional explanation.\n\n$text';
+      final targetNameEn = _langNameEnglish(tgtLang);
+      return 'Translate the following segment into $targetNameEn, without additional explanation.\n\n$text';
     }
   }
 
@@ -244,13 +247,46 @@ class HymtTranslator {
     return text;
   }
 
-  /// 语言代码到显示名称
-  String _langDisplayName(String code) {
+  /// 语言代码到中文名称 (用于 ZH<=>XX prompt 模板)
+  String _langNameChinese(String code) {
     const map = {
       'zh': '中文',
+      'en': '英语',
+      'ja': '日语',
+      'ko': '韩语',
+      'fr': '法语',
+      'de': '德语',
+      'es': '西班牙语',
+      'pt': '葡萄牙语',
+      'ru': '俄语',
+      'ar': '阿拉伯语',
+      'th': '泰语',
+      'vi': '越南语',
+      'it': '意大利语',
+      'ms': '马来语',
+      'id': '印尼语',
+    };
+    return map[code] ?? code;
+  }
+
+  /// 语言代码到英文名称 (用于 XX<=>XX prompt 模板)
+  String _langNameEnglish(String code) {
+    const map = {
+      'zh': 'Chinese',
       'en': 'English',
-      'ja': '日本語',
-      'ko': '한국어',
+      'ja': 'Japanese',
+      'ko': 'Korean',
+      'fr': 'French',
+      'de': 'German',
+      'es': 'Spanish',
+      'pt': 'Portuguese',
+      'ru': 'Russian',
+      'ar': 'Arabic',
+      'th': 'Thai',
+      'vi': 'Vietnamese',
+      'it': 'Italian',
+      'ms': 'Malay',
+      'id': 'Indonesian',
     };
     return map[code] ?? code;
   }
