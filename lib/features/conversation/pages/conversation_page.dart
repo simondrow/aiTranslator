@@ -555,13 +555,21 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
 
   void _onLanguageChanged() async {
     await _ensureModelReady();
-    // 切换语言后清空翻译结果，重置语种锁定
-    ref.read(conversationProvider.notifier).cancelAndClear();
-    _previousText = '';
-    setState(() {
-      _isCompleted = false;
-      _textController.clear();
-    });
+
+    final currentText = _textController.text.trim();
+    final notifier = ref.read(conversationProvider.notifier);
+
+    if (currentText.isNotEmpty) {
+      // 有输入内容 → 保留文本，用新语言约束重新检测+翻译
+      _previousText = currentText;
+      notifier.retranslate(currentText);
+      setState(() => _isCompleted = false);
+    } else {
+      // 无输入 → 正常清空
+      notifier.cancelAndClear();
+      _previousText = '';
+      setState(() => _isCompleted = false);
+    }
   }
 
   // ============================================================

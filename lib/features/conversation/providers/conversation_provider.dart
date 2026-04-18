@@ -409,6 +409,45 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     if (mounted) state = state.clearRealtime();
   }
 
+
+  /// 语言切换后重新翻译当前文本
+  ///
+  /// 与 cancelAndClear 的区别:
+  ///   - 不清空 state (保留 UI 上的输入文本)
+  ///   - 重置语种锁定 + 清空去重缓存
+  ///   - 用新语言约束重新检测方向并翻译
+  void retranslate(String text) {
+    // 1. 停止旧翻译
+    _translateGeneration++;
+    _translateDebounce?.cancel();
+    _pendingText = null;
+    if (_isLlmBusy) {
+      _translationService.stopGeneration();
+      _isLlmBusy = false;
+    }
+
+    // 2. 重置语种锁定和去重
+    _lockedDirection = null;
+    _lastTranslatingText = '';
+
+    // 3. 清空翻译结果但保留其他状态
+    if (mounted) {
+      state = state.copyWith(
+        realtimeTranslation: '',
+        isDetecting: false,
+        isTranslating: false,
+        detectedSourceLang: null,
+        detectedTargetLang: null,
+      );
+    }
+
+    // 4. 如果有文本，重新翻译
+    final cleanText = cleanAsrText(text);
+    if (cleanText.isNotEmpty) {
+      _executeTranslation(cleanText);
+    }
+  }
+
   void clearRealtime() {
     if (mounted) state = state.clearRealtime();
   }
