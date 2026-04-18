@@ -6,7 +6,8 @@ import 'package:path_provider/path_provider.dart';
 import 'hymt_translator.dart';
 
 /// 翻译服务
-/// 使用 HY-MT1.5-1.8B (GGUF via llama.cpp) 实现离线翻译。/// 推理在 native 层异步执行，不阻塕 UI 线程。
+/// 使用 HY-MT1.5-1.8B (GGUF via llama.cpp) 实现离线翻译。
+/// 推理在 native 层异步执行，不阻塞 UI 线程。
 /// 模型未加载时使用 stub 返回占位结果。
 class TranslationService {
   HymtTranslator? _translator;
@@ -46,12 +47,12 @@ class TranslationService {
       if (_translator!.isReady) {
         debugPrint('[TranslationService] HY-MT 翻译引擎已就绪');
       } else {
-        debugPrint('[TranslationService] HY-MT 初始化失败，将䷥ stub 模式运行');
+        debugPrint('[TranslationService] HY-MT 初始化失败，将以 stub 模式运行');
         _translator = null;
       }
     } catch (e) {
       debugPrint('[TranslationService] HY-MT 初始化失败: $e');
-      debugPrint('[TranslationService] 将䷥ stub 模式运行');
+      debugPrint('[TranslationService] 将以 stub 模式运行');
       _translator = null;
       _isInitialized = true;
     } finally {
@@ -73,7 +74,7 @@ class TranslationService {
     return null;
   }
 
-  /// 尝试从默认下载夕录自动初始化
+  /// 尝试从默认下载目录自动初始化
   Future<bool> tryAutoInitialize() async {
     if (_isInitialized && isEngineReady) return true;
 
@@ -119,6 +120,16 @@ class TranslationService {
     }
   }
 
+  /// 中断正在进行的 LLM 推理
+  ///
+  /// 调用后当前 translate() 的 Future 将尽快返回部分结果或原文。
+  /// 用于翻译取消场景 — 避免等待 5-7s 推理完成才能开始下一次翻译。
+  Future<void> stopGeneration() async {
+    if (_translator != null) {
+      await _translator!.stopGeneration();
+    }
+  }
+
   /// Stub 翻译 — 模型未加载时的占位实现
   String _stubTranslate(String text, String fromLang, String toLang) {
     final targetName = _langDisplayName(toLang);
@@ -130,7 +141,7 @@ class TranslationService {
       'zh': '中文',
       'en': 'English',
       'ja': '日本語',
-      'ko': '한국얬',
+      'ko': '한국어',
     };
     return map[code] ?? code;
   }

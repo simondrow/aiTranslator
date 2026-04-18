@@ -72,40 +72,38 @@ class ConversationState {
 
 /// 对话状态管理器
 ///
-/// 翻译调度策略 (解决连续输入场景下的浪费问题):
+/// 翻译调度策略:
 ///
-///   1. **Debounce** — 文本变更后等待一段时间再触发翻译。
-///      文本输入场景: UI 层 400ms debounce + 本类 600ms debounce ≈ 1s
-///      语音输入场景: Page 层控制翻译时机 (有意义增量时直接调用)
+///   1. **Debounce** — 文本输入: UI 400ms + provider 600ms ≈ 1s
+///      语音输入: Page 层按有效字符增量控制，无 debounce
 ///
-///   2. **Generation** — 每次新翻译请求递增 [_translateGeneration]，
-///      完成时检查：若 generation 已过期说明有更新的请求，丢弃结果。
+///   2. **Generation + StopGeneration** — 新请求到来时:
+///      a) 递增 [_translateGeneration] 使旧结果过期
+///      b) 调用 [_translationService.stopGeneration()] **立即中断**正在进行的 LLM 推理
+///      c) 立即启动新翻译，无需等待旧推理完成
 ///
-///   3. **文本去重** — 与上次提交翻译的原文比较，完全相同则跳过。
+///   3. **文本去重** — 相同文本不重复翻译
 ///
-///   4. **LLM 忙队列** — 当 LLM 正在推理时，新请求暂存到 [_pendingText]，
-///      推理完成后 [_drainPending] 自动拾取最新文本继续翻译。
+///   4. **LLM 忙队列** — 如果 stopGeneration 后 LLM 尚未释放完毕，
+///      暂存到 [_pendingText]，释放后 [_drainPending] 自动拾取
 ///
-///   5. **保留上次结果** — 新翻译进行中时，UI 继续显示上一次的译文
-///      (state.realtimeTranslation 不清空)，避免翻译中画面闪烁。
+///   5. **保留上次译文** — 新翻译进行中 UI 继续显示旧译文，避免闪烁
 class ConversationNotifier extends StateNotifier<ConversationState> {
   final AsrService _asrService;
   final TranslationService _translationService;
   final LanguageDetectService _languageDetectService;
 
-  /// 翻译请求版本号——每次新请求 +1，旧请求完成时对比，过期则丢弃
+  /// 翻译请求版本号
   int _translateGeneration = 0;
 
-  /// 上一次提交翻译的原文（用于去重，避免相同文本重复翻译）
+  /// 上一次提交翻译的原文（去重用）
   String _lastTranslatingText = '';
 
-  /// 已锁定的翻译方向（源 → 目标）
+  /// 已锁定的翻译方向
   ({String source, String target})? _lockedDirection;
 
-  /// 翻译 debounce 定时器 (仅文本输入场景使用)
+  /// 翻译 debounce 定时器 (仅文本输入)
   Timer? _translateDebounce;
-
-  /// 翻译 debounce 时长。
   static const _translateDebounceDuration = Duration(milliseconds: 600);
 
   /// 当前是否有翻译任务正在 LLM 推理中
@@ -113,6 +111,9 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
   /// LLM 忙时积压的最新文本
   String? _pendingText;
+
+  /// 整体 pipeline 计时 (从用户文本变化到翻译结果更新)
+  final Stopwatch _pipelineSw = Stopwatch();
 
   ConversationNotifier({
     required AsrService asrService,
@@ -125,44 +126,33 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     Future.microtask(() => _initServices());
   }
 
-  /// 初始化语种检测 + 翻译引擎 + ASR 引擎
   Future<void> _initServices() async {
-    // 1. 语种检测
     try {
       await _languageDetectService.initialize();
       debugPrint('[ConversationNotifier] 语种检测服务初始化完成');
     } catch (e) {
       debugPrint('[ConversationNotifier] 语种检测初始化失败: $e');
-      debugPrint('[ConversationNotifier] 将使用后备检测逻辑');
     }
 
-    // 2. 翻译引擎
     try {
       final ready = await _translationService.tryAutoInitialize();
-      debugPrint('[ConversationNotifier] 翻译引擎自动初始化: ${ready ? "成功" : "未就绪 (stub 模式)"}');
+      debugPrint('[ConversationNotifier] 翻译引擎自动初始化: ${ready ? "成功" : "未就绪"}');
     } catch (e) {
       debugPrint('[ConversationNotifier] 翻译引擎自动初始化失败: $e');
     }
 
-    // 3. ASR (SenseVoice via sherpa-onnx)
     try {
       final ready = await _asrService.tryAutoInitialize();
-      debugPrint('[ConversationNotifier] ASR 引擎自动初始化: ${ready ? "成功" : "未就绪 (模型未下载)"}');
+      debugPrint('[ConversationNotifier] ASR 引擎自动初始化: ${ready ? "成功" : "未就绪"}');
     } catch (e) {
       debugPrint('[ConversationNotifier] ASR 引擎自动初始化失败: $e');
     }
   }
 
-  /// 翻译引擎是否真正就绪
   bool get isTranslationReady => _translationService.isEngineReady;
-
-  /// ASR 引擎是否就绪
   bool get isAsrReady => _asrService.isInitialized;
-
-  /// LLM 当前是否正在推理
   bool get isLlmBusy => _isLlmBusy;
 
-  /// 手动初始化翻译引擎 (模型下载完成后调用)
   Future<void> initTranslationEngine(String modelDir) async {
     try {
       await _translationService.initialize(modelDir);
@@ -172,7 +162,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     }
   }
 
-  /// 手动初始化 ASR 引擎 — SenseVoice (模型下载完成后调用)
   Future<void> initAsrEngine(String modelPath) async {
     try {
       await _asrService.initialize(modelPath);
@@ -194,12 +183,10 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     _lastTranslatingText = '';
   }
 
-  /// 检测语种并确定翻译方向
   ({String source, String target}) _detectDirection(String text) {
     final detectResult = _languageDetectService.detectLanguage(text);
     final rawLang = detectResult.languageCode;
 
-    // 1. 精确匹配
     if (_matchesLanguage(rawLang, state.myLanguage)) {
       return (source: state.myLanguage, target: state.theirLanguage);
     }
@@ -207,35 +194,27 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       return (source: state.theirLanguage, target: state.myLanguage);
     }
 
-    // 2. 语言族归属
     final detectedFamily = LanguageCodes.getFamily(rawLang);
     final myFamily = LanguageCodes.getFamily(state.myLanguage);
     final theirFamily = LanguageCodes.getFamily(state.theirLanguage);
 
     if (detectedFamily == theirFamily && detectedFamily != myFamily) {
-      debugPrint('[ConversationNotifier] 语言族归属: $rawLang → ${state.theirLanguage} 侧 (同族: $detectedFamily)');
+      debugPrint('[ConversationNotifier] 语言族归属: $rawLang → ${state.theirLanguage} 侧');
       return (source: state.theirLanguage, target: state.myLanguage);
     }
     if (detectedFamily == myFamily && detectedFamily != theirFamily) {
-      debugPrint('[ConversationNotifier] 语言族归属: $rawLang → ${state.myLanguage} 侧 (同族: $detectedFamily)');
+      debugPrint('[ConversationNotifier] 语言族归属: $rawLang → ${state.myLanguage} 侧');
       return (source: state.myLanguage, target: state.theirLanguage);
     }
 
-    // 3. 默认
     return (source: state.myLanguage, target: state.theirLanguage);
   }
 
   // ============================================================
-  // 实时翻译调度 (debounce + generation + queue)
+  // 翻译调度
   // ============================================================
 
-  /// 实时语种检测 + 翻译 (文本输入场景，带 debounce)
-  ///
-  /// 调度策略:
-  ///   - 内部 debounce [_translateDebounceDuration]，连续快速调用只保留最后一次。
-  ///   - 如果 LLM 正在推理中，将文本暂存 [_pendingText]，
-  ///     等当前推理结束后自动拾取最新文本继续翻译。
-  ///   - 新文本与上次完全相同且已有结果，跳过。
+  /// 文本输入场景: 带 debounce
   Future<void> detectAndTranslate(String text) async {
     if (text.trim().isEmpty) {
       if (mounted) state = state.clearRealtime();
@@ -248,56 +227,60 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       return;
     }
 
-    // 去重：文本与上次完全相同且已有翻译结果，跳过
     if (cleanText == _lastTranslatingText &&
         state.realtimeTranslation.isNotEmpty &&
         !_isLlmBusy) {
       return;
     }
 
-    // 取消之前的 debounce
+    // 开始 pipeline 计时
+    _pipelineSw
+      ..reset()
+      ..start();
+
     _translateDebounce?.cancel();
 
-    // 如果 LLM 正在推理，将新文本暂存，等推理结束后自动处理
+    // ★ 新请求到来时，立即中断正在进行的 LLM 推理
     if (_isLlmBusy) {
-      _pendingText = cleanText;
       debugPrint(
-        '[ConversationNotifier] LLM 忙, 暂存文本: '
-        '"${cleanText.length > 30 ? '${cleanText.substring(0, 30)}...' : cleanText}"',
+        '[ConversationNotifier] 新文本到达, 中断旧推理 + 暂存',
       );
-      // 递增 generation 使正在进行的翻译结果过期
       _translateGeneration++;
+      _translationService.stopGeneration(); // fire-and-forget
+      _pendingText = cleanText;
       return;
     }
 
-    // Debounce: 等待文本稳定后再实际翻译
     _translateDebounce = Timer(_translateDebounceDuration, () {
+      debugPrint(
+        '[ConversationNotifier] [pipeline] debounce触发 ${_pipelineSw.elapsedMilliseconds}ms',
+      );
       _executeTranslation(cleanText);
     });
   }
 
-  /// 语音场景: 直接请求翻译 (无 debounce，由 Page 层控制调用时机)
-  ///
-  /// 与 [detectAndTranslate] 的区别：
-  ///   - 不做 debounce (Page 层已经控制了翻译节奏)
-  ///   - LLM 忙时同样暂存，不丢弃
+  /// 语音场景: 无 debounce，Page 层控制调用时机
   void translateForVoice(String fullText) {
     final cleanText = cleanAsrText(fullText);
     if (cleanText.isEmpty) return;
 
-    // 去重
     if (cleanText == _lastTranslatingText &&
         state.realtimeTranslation.isNotEmpty &&
         !_isLlmBusy) {
       return;
     }
 
+    _pipelineSw
+      ..reset()
+      ..start();
+
+    // ★ 中断旧推理
     if (_isLlmBusy) {
-      _pendingText = cleanText;
       _translateGeneration++;
+      _translationService.stopGeneration();
+      _pendingText = cleanText;
       debugPrint(
-        '[ConversationNotifier] [语音] LLM 忙, 暂存: '
-        '"${cleanText.length > 30 ? '${cleanText.substring(0, 30)}...' : cleanText}"',
+        '[ConversationNotifier] [语音] 中断旧推理, 暂存新文本',
       );
       return;
     }
@@ -305,9 +288,8 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     _executeTranslation(cleanText);
   }
 
-  /// 实际执行翻译 (debounce 后 / pending 恢复 / 语音直接调用)
+  /// 实际执行翻译
   Future<void> _executeTranslation(String cleanText) async {
-    // 再次去重
     if (cleanText == _lastTranslatingText &&
         state.realtimeTranslation.isNotEmpty) {
       return;
@@ -320,21 +302,23 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     if (mounted) state = state.copyWith(isDetecting: true);
 
     try {
-      // 语种检测：仅首次检测，之后锁定方向
+      // 语种检测 (仅首次)
       final ({String source, String target}) dir;
       if (_lockedDirection != null) {
         dir = _lockedDirection!;
       } else {
+        final lidSw = Stopwatch()..start();
         dir = _detectDirection(cleanText);
+        lidSw.stop();
         _lockedDirection = dir;
         debugPrint(
-          '[ConversationNotifier] 语种方向已锁定: ${dir.source} → ${dir.target}',
+          '[ConversationNotifier] [pipeline] 语种检测 ${lidSw.elapsedMilliseconds}ms: '
+          '${dir.source} → ${dir.target}',
         );
       }
 
       if (gen != _translateGeneration || !mounted) return;
 
-      // 不清空 realtimeTranslation —— 保留上一次译文，避免 UI 闪烁
       state = state.copyWith(
         detectedSourceLang: dir.source,
         detectedTargetLang: dir.target,
@@ -343,10 +327,10 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       );
 
       debugPrint(
-        '[ConversationNotifier] 开始翻译 gen=$gen: '
+        '[ConversationNotifier] [pipeline] 翻译开始 gen=$gen | '
+        'pipeline已过=${_pipelineSw.elapsedMilliseconds}ms | '
         '"${cleanText.length > 40 ? '${cleanText.substring(0, 40)}...' : cleanText}"',
       );
-      final sw = Stopwatch()..start();
 
       _isLlmBusy = true;
       final translated = await _translationService.translate(
@@ -356,65 +340,72 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       );
       _isLlmBusy = false;
 
-      sw.stop();
-      debugPrint(
-        '[ConversationNotifier] 翻译完成 gen=$gen ${sw.elapsedMilliseconds}ms',
-      );
-
-      // 检查 generation 是否过期
       if (gen != _translateGeneration) {
         debugPrint(
-          '[ConversationNotifier] 翻译结果已过期 gen=$gen '
-          '(当前: $_translateGeneration), 丢弃',
+          '[ConversationNotifier] [pipeline] 翻译过期 gen=$gen (当前=$_translateGeneration), 丢弃',
         );
-        // 有暂存文本，立即处理
         _drainPending();
         return;
       }
 
       if (!mounted) return;
+
+      final pipelineMs = _pipelineSw.elapsedMilliseconds;
+      _pipelineSw.stop();
+      debugPrint(
+        '[ConversationNotifier] [pipeline] ✅ 翻译完成 gen=$gen | '
+        'pipeline总耗时=${pipelineMs}ms | '
+        '"$translated"',
+      );
+
       state = state.copyWith(
         realtimeTranslation: translated,
         isTranslating: false,
         isDetecting: false,
       );
 
-      // 翻译完成后检查是否有暂存文本
       _drainPending();
     } catch (e) {
       _isLlmBusy = false;
       if (gen == _translateGeneration && mounted) {
         state = state.copyWith(isDetecting: false, isTranslating: false);
       }
-      debugPrint('[ConversationNotifier] 实时检测翻译失败: $e');
+      debugPrint('[ConversationNotifier] 翻译失败: $e');
       _drainPending();
     }
   }
 
-  /// 如果有暂存文本，立即启动新一轮翻译（无 debounce）
   void _drainPending() {
     final pending = _pendingText;
     if (pending != null && pending.isNotEmpty) {
       _pendingText = null;
-      debugPrint('[ConversationNotifier] 处理暂存文本');
+      debugPrint('[ConversationNotifier] [pipeline] 处理暂存文本');
       _executeTranslation(pending);
     }
   }
 
-  /// 取消进行中的翻译（递增 generation 使旧结果过期）
+  /// 取消翻译 — 中断 LLM 推理 + 递增 generation
   void cancelTranslation() {
     _translateGeneration++;
     _translateDebounce?.cancel();
     _pendingText = null;
+    if (_isLlmBusy) {
+      _translationService.stopGeneration();
+      _isLlmBusy = false;
+    }
   }
 
-  /// 取消翻译 + 清空实时状态 + 重置语种锁定
+  /// 取消翻译 + 清空状态 + 重置语种锁定
   void cancelAndClear() {
     _translateGeneration++;
     _translateDebounce?.cancel();
     _pendingText = null;
     _lockedDirection = null;
     _lastTranslatingText = '';
+    if (_isLlmBusy) {
+      _translationService.stopGeneration();
+      _isLlmBusy = false;
+    }
     if (mounted) state = state.clearRealtime();
   }
 
@@ -445,17 +436,19 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
   Future<void> sendTextMessage(String text) async {
     if (text.trim().isEmpty) return;
 
-    // 取消进行中的实时翻译
     final gen = ++_translateGeneration;
     _translateDebounce?.cancel();
     _pendingText = null;
+    if (_isLlmBusy) {
+      _translationService.stopGeneration();
+    }
 
     state = state.copyWith(isProcessing: true);
 
     try {
       final dir = _lockedDirection ?? _detectDirection(text);
 
-      debugPrint('[ConversationNotifier] sendTextMessage 翻译开始 gen=$gen');
+      debugPrint('[ConversationNotifier] sendTextMessage gen=$gen 开始');
       final sw = Stopwatch()..start();
 
       _isLlmBusy = true;
@@ -468,15 +461,12 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
 
       sw.stop();
       debugPrint(
-        '[ConversationNotifier] sendTextMessage 翻译完成 ${sw.elapsedMilliseconds}ms',
+        '[ConversationNotifier] sendTextMessage gen=$gen 完成 ${sw.elapsedMilliseconds}ms',
       );
 
       if (gen != _translateGeneration) {
         if (mounted) {
-          state = state.copyWith(
-            isProcessing: false,
-            isTranslating: false,
-          );
+          state = state.copyWith(isProcessing: false, isTranslating: false);
         }
         return;
       }
@@ -512,25 +502,17 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     }
   }
 
-  /// 发送语音消息
   Future<void> sendVoiceMessage(String audioPath) async {
     state = state.copyWith(isProcessing: true);
 
     try {
-      // ASR: 语音 → 文本
       final asrResult = await _asrService.transcribe(audioPath);
       final String text = asrResult.text;
 
       if (text.trim().isEmpty) {
         state = state.copyWith(isProcessing: false);
-        debugPrint('[ConversationNotifier] ASR 返回空文本');
         return;
       }
-
-      debugPrint(
-        '[ConversationNotifier] ASR 识别结果: "$text" '
-        '(lang: ${asrResult.detectedLanguage})',
-      );
 
       final dir = _detectDirection(text);
 
@@ -569,22 +551,16 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     }
   }
 
-  /// 仅做语音转文字（供流式录音调用）
   Future<String> transcribeAudio(String audioPath) async {
     try {
       final sw = Stopwatch()..start();
       final asrResult = await _asrService.transcribe(audioPath);
       sw.stop();
       final text = asrResult.text.trim();
-      if (text.isNotEmpty) {
-        debugPrint(
-          '[ConversationNotifier] transcribeAudio ${sw.elapsedMilliseconds}ms: "$text"',
-        );
-      } else {
-        debugPrint(
-          '[ConversationNotifier] transcribeAudio ${sw.elapsedMilliseconds}ms: (empty)',
-        );
-      }
+      debugPrint(
+        '[ConversationNotifier] [pipeline] ASR ${sw.elapsedMilliseconds}ms: '
+        '"${text.length > 50 ? '${text.substring(0, 50)}...' : text}"',
+      );
       return text;
     } catch (e) {
       debugPrint('[ConversationNotifier] transcribeAudio failed: $e');
@@ -592,7 +568,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     }
   }
 
-  /// 删除指定位置的消息
   void removeMessageAt(int index) {
     final updated = List<Message>.from(state.messages);
     if (index >= 0 && index < updated.length) {
@@ -612,8 +587,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     return false;
   }
 
-  /// 过滤 ASR 输出中的非语音标记
-  /// [BLANK_AUDIO], [music], [Music], [cow mooing], (music), <|nospeech|> etc.
   static final _noiseTokenPattern = RegExp(
     r'\[(?:BLANK_AUDIO|blank_audio|music|Music|MUSIC|cow mooing|laughter|applause|noise|silence|Silence|NOISE)\]'
     r'|\((?:music|Music|laughter|applause|noise)\)'
@@ -623,7 +596,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     caseSensitive: false,
   );
 
-  /// 清理 ASR 文本：移除噪音标记并整理空格
   static String cleanAsrText(String text) {
     return text
         .replaceAll(_noiseTokenPattern, '')
@@ -631,8 +603,6 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         .trim();
   }
 
-  /// 统计文本中的有效字符数（字母、CJK、假名、韩文），
-  /// 用于判断 ASR 输出是否包含有意义的语音内容。
   static int countMeaningfulChars(String text) {
     int count = 0;
     for (final rune in text.runes) {
