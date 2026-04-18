@@ -17,6 +17,13 @@ import 'package:flutter_llama/flutter_llama.dart';
 ///   flutter_llama 1.1.2 的 generateStream() 先调用 MethodChannel
 ///   再订阅 EventChannel，导致 native 端 eventSink 为 null。
 ///   本类直接操作底层 channel，确保先订阅再调用。
+///
+/// ⚠️ EventChannel 残留 endOfStream 问题:
+///   stopGeneration 后 native 端通过 mainHandler.post 发送 endOfStream,
+///   该事件可能延迟到达，被下一次 receiveBroadcastStream 的 onDone 捕获，
+///   导致 Completer 立即完成、0 tokens。
+///   解决方案: 使用 MethodChannel 的 result 回调来判断推理是否真正完成,
+///   而不是依赖 EventChannel 的 onDone。
 class HymtTranslator {
   FlutterLlama? _llama;
   bool _isReady = false;
@@ -91,10 +98,20 @@ class HymtTranslator {
   }
 
   /// 翻译文本 (使用流式生成，支持中途取消)
+  ///
+  /// 核心策略:
+  ///   1. 先订阅 EventChannel 接收 token
+  ///   2. 再调 MethodChannel 发起推理
+  ///   3. 用 MethodChannel 的 result 回调判断推理完成 (不依赖 onDone)
+  ///   4. stopGeneration 后等待一帧让残留 endOfStream 排掉再开新推理
   Future<String> translate(String text, String srcLang, String tgtLang) async {
     if (!_isReady || _llama == null) {
       throw StateError('HY-MT 翻译引擎未初始化');
     }
+
+    // 等待一帧，让上一次 stopGeneration 的 mainHandler.post(endOfStream)
+    // 排出消息队列，避免污染本次 EventChannel 订阅
+    await Future<void>.delayed(const Duration(milliseconds: 50));
 
     final totalSw = Stopwatch()..start();
 
@@ -121,19 +138,10 @@ class HymtTranslator {
         '源文="${text.length > 40 ? '${text.substring(0, 40)}...' : text}"',
       );
 
-      // ⚠️ 关键修复: 先订阅 EventChannel，再调用 MethodChannel
-      // flutter_llama 1.1.2 的 generateStream() 存在竞态条件:
-      //   它先 invokeMethod('generateStream') 再 receiveBroadcastStream()
-      //   导致 native 端 eventSink 为 null → NO_EVENT_SINK 错误
-      //
-      // 正确顺序:
-      //   1. receiveBroadcastStream() → 触发 native onListen → eventSink 就绪
-      //   2. invokeMethod('generateStream') → native 通过 eventSink 发送 token
-
       final completer = Completer<void>();
       StreamSubscription<dynamic>? subscription;
 
-      // Step 1: 先订阅 EventChannel
+      // Step 1: 先订阅 EventChannel 收集 token
       subscription = _eventChannel.receiveBroadcastStream().listen(
         (dynamic token) {
           if (!_isGenerating) {
@@ -153,6 +161,9 @@ class HymtTranslator {
           }
         },
         onDone: () {
+          // onDone 可能是残留的 endOfStream，也可能是真正结束
+          // 只在 completer 未完成时才 complete
+          debugPrint('[HymtTranslator] EventChannel onDone (tokens=$tokenCount)');
           if (!completer.isCompleted) completer.complete();
         },
         onError: (dynamic error) {
@@ -161,19 +172,24 @@ class HymtTranslator {
         },
       );
 
-      // Step 2: 等一帧确保 onListen 已触发
+      // Step 2: 等一帧确保 onListen 已触发 (native eventSink 赋值)
       await Future<void>.delayed(Duration.zero);
 
       // Step 3: 调用 MethodChannel 发起推理
-      // 注意: native 端 result.success 在推理全部完成后才回调,
-      // 所以不 await invokeMethod (否则会阻塞到推理结束才继续)。
-      // token 通过 EventChannel 实时推送, 用 completer 等 onDone 即可。
-      _channel.invokeMethod<void>('generateStream', paramsMap).catchError((e) {
+      // MethodChannel 的 result.success(null) 在 native 推理完成后回调
+      // 同时设置 completer，这样即使 onDone 丢失也能正确结束
+      _channel.invokeMethod<void>('generateStream', paramsMap).then((_) {
+        debugPrint('[HymtTranslator] MethodChannel 推理回调完成 (tokens=$tokenCount)');
+        // 给 EventChannel 最后的 token 事件一点时间排完
+        Future<void>.delayed(const Duration(milliseconds: 20), () {
+          if (!completer.isCompleted) completer.complete();
+        });
+      }).catchError((dynamic e) {
         debugPrint('[HymtTranslator] generateStream MethodChannel 错误: $e');
         if (!completer.isCompleted) completer.complete();
       });
 
-      // Step 4: 等待 EventChannel 流结束 (onDone / onError)
+      // Step 4: 等待推理完成 (onDone 或 MethodChannel result，谁先到谁算)
       await completer.future;
       subscription.cancel();
     } catch (e) {
@@ -199,7 +215,8 @@ class HymtTranslator {
       '"$text" → "$result"',
     );
 
-    return result.isEmpty ? text : result;
+    // 翻译结果为空时不回退到原文，返回空串让上层处理
+    return result;
   }
 
   /// 中断正在进行的推理
