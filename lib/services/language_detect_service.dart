@@ -77,6 +77,9 @@ class LanguageDetectService {
   ///   2. 置信度不足时，回退到 Unicode 启发式 [_fallbackDetect]。
   ///      短文本（< 10 字符）或含大量非 ASCII 字符的文本中
   ///      fastText 经常误判为 en，此分支可有效纠正。
+  ///   3. fastText 返回 ja 时，用 Unicode 二次校验 [_disambiguateCjk]：
+  ///      若文本含汉字但无平假名/片假名，修正为 zh。
+  ///      (lid.176.ftz 对纯汉字文本常误判为 ja)
   LanguageDetectResult detectLanguage(String text) {
     if (!_isInitialized || _bindings == null) {
       return _fallbackDetect(text);
@@ -113,6 +116,16 @@ class LanguageDetectService {
         return fallback;
       }
 
+      // ── CJK 消歧: fastText 对纯汉字文本常误判为 ja ──
+      // 当 fastText 返回 ja 时，检查文本是否真的包含日文特征字符
+      // （平假名/片假名）。如果只有汉字没有假名，修正为 zh。
+      if (langCode == 'ja') {
+        final corrected = _disambiguateCjk(text, confidence);
+        if (corrected != null) {
+          return corrected;
+        }
+      }
+
       return LanguageDetectResult(
         languageCode: langCode,
         confidence: confidence,
@@ -121,6 +134,59 @@ class LanguageDetectService {
       debugPrint('[LanguageDetectService] 语种检测失败: $e');
       return _fallbackDetect(text);
     }
+  }
+
+  /// 当 fastText 返回 ja 时，用 Unicode 特征二次校验。
+  ///
+  /// 日文文本几乎必然包含平假名或片假名；纯汉字文本被 fastText
+  /// 误判为 ja 是 lid.176.ftz 的已知问题。
+  ///
+  /// 返回 null 表示不修正（确实是日文），否则返回修正后的结果。
+  LanguageDetectResult? _disambiguateCjk(String text, double ftConfidence) {
+    int cjkCount = 0;
+    int hiraCount = 0;
+    int kataCount = 0;
+
+    for (final rune in text.runes) {
+      if ((rune >= 0x4E00 && rune <= 0x9FFF) ||
+          (rune >= 0x3400 && rune <= 0x4DBF) ||
+          (rune >= 0x20000 && rune <= 0x2A6DF)) {
+        cjkCount++;
+      } else if (rune >= 0x3040 && rune <= 0x309F) {
+        hiraCount++;
+      } else if (rune >= 0x30A0 && rune <= 0x30FF) {
+        kataCount++;
+      }
+    }
+
+    final japSpecific = hiraCount + kataCount;
+
+    // 文本含汉字但完全没有假名 → 修正为中文
+    if (cjkCount > 0 && japSpecific == 0) {
+      debugPrint(
+        '[LanguageDetectService] CJK消歧: fastText=ja 但无假名 '
+        '(汉字=$cjkCount), 修正为 zh',
+      );
+      return LanguageDetectResult(
+        languageCode: 'zh',
+        confidence: ftConfidence,
+      );
+    }
+
+    // 汉字远多于假名（比例 > 4:1）且假名极少 → 也可能是中文夹杂个别假名
+    // 保守起见，假名数 <= 1 且汉字 >= 4 时修正
+    if (cjkCount >= 4 && japSpecific <= 1) {
+      debugPrint(
+        '[LanguageDetectService] CJK消歧: fastText=ja 假名极少 '
+        '(汉字=$cjkCount, 假名=$japSpecific), 修正为 zh',
+      );
+      return LanguageDetectResult(
+        languageCode: 'zh',
+        confidence: ftConfidence * 0.9,
+      );
+    }
+
+    return null; // 确实是日文，不修正
   }
 
   /// 基于 Unicode 码欵的后备语种检测
