@@ -121,6 +121,9 @@ class HymtTranslator {
     final prompt = _buildFullPrompt(text, srcLang, tgtLang);
     final promptMs = totalSw.elapsedMilliseconds;
 
+    debugPrint('[HymtTranslator] 完整prompt: $prompt');
+    debugPrint('[HymtTranslator] 源语言: $srcLang, 目标语言: $tgtLang');
+
     final paramsMap = <String, dynamic>{
       'prompt': prompt,
       'temperature': 0.7,

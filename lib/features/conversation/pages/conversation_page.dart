@@ -358,8 +358,10 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
 
       if (_hasVoiceTranslation &&
           currentState.realtimeTranslation.isNotEmpty &&
-          delta < _voiceTranslateMinDelta) {
-        // 已有翻译结果且最终文本无有意义增量，直接 commit
+          delta < _voiceTranslateMinDelta &&
+          !currentState.isTranslating &&
+          !currentState.isDetecting) {
+        // 已有翻译结果、最终文本无有意义增量且翻译已完成，直接 commit
         debugPrint(
           '[ConversationPage] 语音结束: 无增量 (delta=$delta), 复用已有翻译',
         );
@@ -369,7 +371,7 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
           _isCompleted = true;
         });
       } else {
-        // 有增量或无已有翻译，触发最终翻译
+        // 有增量或无已有翻译或翻译正在进行，触发最终翻译
         debugPrint(
           '[ConversationPage] 语音结束: 有增量 (delta=$delta), 执行最终翻译',
         );

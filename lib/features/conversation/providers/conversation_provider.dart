@@ -187,6 +187,8 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
     final detectResult = _languageDetectService.detectLanguage(text);
     final rawLang = detectResult.languageCode;
 
+    // 优先使用检测到的语言，避免语言族匹配导致的错误方向
+    // 特别是韩语、日语等CJK语言，应从检测到的语言翻译到目标语言
     if (_matchesLanguage(rawLang, state.myLanguage)) {
       return (source: state.myLanguage, target: state.theirLanguage);
     }
@@ -194,19 +196,20 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
       return (source: state.theirLanguage, target: state.myLanguage);
     }
 
+    // 检测到的语言是第三方语言时，根据用户语言设置决定方向
     final detectedFamily = LanguageCodes.getFamily(rawLang);
     final myFamily = LanguageCodes.getFamily(state.myLanguage);
     final theirFamily = LanguageCodes.getFamily(state.theirLanguage);
 
-    if (detectedFamily == theirFamily && detectedFamily != myFamily) {
-      debugPrint('[ConversationNotifier] 语言族归属: $rawLang → ${state.theirLanguage} 侧');
-      return (source: state.theirLanguage, target: state.myLanguage);
+    // 检测到的语言族与用户某一侧相同时，优先从检测到的语言翻译
+    if (detectedFamily == myFamily) {
+      return (source: rawLang, target: state.theirLanguage);
     }
-    if (detectedFamily == myFamily && detectedFamily != theirFamily) {
-      debugPrint('[ConversationNotifier] 语言族归属: $rawLang → ${state.myLanguage} 侧');
-      return (source: state.myLanguage, target: state.theirLanguage);
+    if (detectedFamily == theirFamily) {
+      return (source: rawLang, target: state.myLanguage);
     }
 
+    // 兜底：默认从myLanguage翻译到theirLanguage
     return (source: state.myLanguage, target: state.theirLanguage);
   }
 
@@ -358,11 +361,25 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         '"$translated"',
       );
 
+      // 清除可能的stub翻译结果
+      // stub翻译格式: "[Language] text" (如 "[English] 我今天休息")
+      // 当真实翻译完成时，如果旧的translation是stub格式，说明模型刚加载，应清除
+
+      // 检测是否是stub翻译（包含语言标识）
+      final isStubTranslation = _isStubTranslation(state.realtimeTranslation);
+      final oldTranslation = state.realtimeTranslation;
+
       state = state.copyWith(
         realtimeTranslation: translated,
         isTranslating: false,
         isDetecting: false,
       );
+
+      // 如果是stub翻译且现在有真实翻译，说明模型刚加载完成
+      // 需要确保UI更新，避免stub残留
+      if (isStubTranslation && translated.isNotEmpty) {
+        debugPrint('[ConversationNotifier] 清除stub翻译: "$oldTranslation" → "$translated"');
+      }
 
       _drainPending();
     } catch (e) {
@@ -640,6 +657,17 @@ class ConversationNotifier extends StateNotifier<ConversationState> {
         .replaceAll(_noiseTokenPattern, '')
         .replaceAll(RegExp(r'\s{2,}'), ' ')
         .trim();
+  }
+
+  /// 检测是否为stub翻译结果
+  /// stub格式: "[Language] text" (如 "[English] 我今天休息"）
+  static bool _isStubTranslation(String translation) {
+    if (translation.isEmpty) return false;
+
+    // 匹配模式: "[xxx] text"
+    // 其中xxx是语言名称（可能包含空格和特殊字符）
+    final stubPattern = RegExp(r'^\[([^]]+)\]\s+(.+)$');
+    return stubPattern.hasMatch(translation);
   }
 
   static int countMeaningfulChars(String text) {
