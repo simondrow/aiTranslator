@@ -98,3 +98,5 @@ assets/models/whisper/
 all_certs.pem
 flutter_log.txt
 android/build/
+# Local dependency overrides
+pubspec_overrides.yaml
